@@ -1,35 +1,38 @@
 {
   "name": "antigravity-proxy",
   "displayName": "Antigravity Proxy",
-  "description": "macOS 透明代理注入工具 — 一键编译、签名、启动 SOCKS5/HTTP 代理注入",
+  "description": "macOS 透明代理注入工具 — 为 Antigravity 助手提供全流程自动化代理方案（编译、签名、注入、状态监控）。",
   "version": "0.0.1",
-  "publisher": "rbz",
+  "publisher": "ray2666",
   "author": "ray",
   "repository": {
     "type": "git",
     "url": "https://github.com/raybz/Antigravity-Proxy.git"
   },
+  "bugs": {
+    "url": "https://github.com/raybz/Antigravity-Proxy/issues"
+  },
+  "homepage": "https://github.com/raybz/Antigravity-Proxy",
+  "license": "MIT",
   "icon": "icon.png",
   "engines": {
     "vscode": "^1.80.0"
   },
   "categories": [
-    "Other"
+    "Other",
+    "Programming Languages"
   ],
   "keywords": [
     "proxy",
     "socks5",
     "macos",
     "transparent-proxy",
-    "antigravity"
+    "antigravity",
+    "clash",
+    "v2ray"
   ],
   "activationEvents": [
-    "onStartupFinished",
-    "onCommand:antigravity-proxy.start",
-    "onCommand:antigravity-proxy.stop",
-    "onCommand:antigravity-proxy.resign",
-    "onCommand:antigravity-proxy.showLog",
-    "onCommand:antigravity-proxy.openSettings"
+    "onStartupFinished"
   ],
   "main": "./out/extension.js",
   "contributes": {
@@ -111,7 +114,5 @@
     "@types/vscode": "^1.80.0",
     "typescript": "^5.3.0"
   },
-  "dependencies": {
-    "package": "^1.0.1"
-  }
+  "dependencies": {}
 }
