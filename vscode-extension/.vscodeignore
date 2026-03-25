@@ -1,0 +1,10 @@
+.vscode/**
+.vscode-test/**
+out/test/**
+src/**
+.gitignore
+.antigravityignore
+!bin/**
+node_modules/**
+install.sh
+antigravity-proxy-*.vsix

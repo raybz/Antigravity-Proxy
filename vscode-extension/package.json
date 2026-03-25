@@ -1,0 +1,117 @@
+{
+  "name": "antigravity-proxy",
+  "displayName": "Antigravity Proxy",
+  "description": "macOS 透明代理注入工具 — 一键编译、签名、启动 SOCKS5/HTTP 代理注入",
+  "version": "0.0.1",
+  "publisher": "rbz",
+  "author": "ray",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/rbz/Antigravity-Proxy"
+  },
+  "icon": "icon.png",
+  "engines": {
+    "vscode": "^1.80.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "keywords": [
+    "proxy",
+    "socks5",
+    "macos",
+    "transparent-proxy",
+    "antigravity"
+  ],
+  "activationEvents": [
+    "onStartupFinished",
+    "onCommand:antigravity-proxy.start",
+    "onCommand:antigravity-proxy.stop",
+    "onCommand:antigravity-proxy.resign",
+    "onCommand:antigravity-proxy.showLog",
+    "onCommand:antigravity-proxy.openSettings"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "antigravity-proxy.start",
+        "title": "🚀 启动代理",
+        "category": "Antigravity Proxy"
+      },
+      {
+        "command": "antigravity-proxy.stop",
+        "title": "⏹ 停止代理",
+        "category": "Antigravity Proxy"
+      },
+      {
+        "command": "antigravity-proxy.resign",
+        "title": "🔑 强制重签名",
+        "category": "Antigravity Proxy"
+      },
+      {
+        "command": "antigravity-proxy.showLog",
+        "title": "📋 查看日志",
+        "category": "Antigravity Proxy"
+      },
+      {
+        "command": "antigravity-proxy.openSettings",
+        "title": "⚙️ 打开配置页面",
+        "category": "Antigravity Proxy"
+      }
+    ],
+    "configuration": {
+      "title": "Antigravity Proxy",
+      "properties": {
+        "antigravity-proxy.proxyHost": {
+          "type": "string",
+          "default": "127.0.0.1",
+          "description": "代理服务器地址"
+        },
+        "antigravity-proxy.proxyPort": {
+          "type": "number",
+          "default": 10808,
+          "description": "代理服务器端口"
+        },
+        "antigravity-proxy.proxyType": {
+          "type": "string",
+          "enum": [
+            "socks5",
+            "http"
+          ],
+          "default": "socks5",
+          "description": "代理类型"
+        },
+        "antigravity-proxy.timeout": {
+          "type": "number",
+          "default": 5000,
+          "description": "连接超时（毫秒）"
+        },
+        "antigravity-proxy.antigravityAppPath": {
+          "type": "string",
+          "default": "",
+          "description": "Antigravity.app 安装路径（留空自动检测）"
+        },
+        "antigravity-proxy.autoStart": {
+          "type": "boolean",
+          "default": false,
+          "description": "启动时自动开启代理"
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "package": "npx vsce package --allow-missing-repository"
+  },
+  "devDependencies": {
+    "@types/node": "^18.0.0",
+    "@types/vscode": "^1.80.0",
+    "typescript": "^5.3.0"
+  },
+  "dependencies": {
+    "package": "^1.0.1"
+  }
+}

@@ -1,0 +1,11 @@
+# Antigravity-Proxy Configuration
+proxy:
+  host: "127.0.0.1"
+  port: 10808
+  type: "socks5"
+  timeout: 5000
+  child_injection: true
+
+# FakeIP range (not used yet but reserved)
+dns:
+  fakeip_range: "198.18.0.0/16"
