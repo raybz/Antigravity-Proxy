@@ -1,6 +1,9 @@
 import * as vscode from 'vscode';
 import { getConfig, updateConfig, syncConfigYaml, ProxyConfig } from './configManager';
 import { validateAll, ValidationResult, detectAntigravityPath } from './validator';
+import { collectDiagnostics } from './diagnostics';
+import { preparePrivilegedEnvironment } from './proxyManager';
+import { installSudoHelper } from './installHelper';
 import { log, logSuccess, logError } from './logger';
 
 let panel: vscode.WebviewPanel | undefined;
@@ -90,6 +93,30 @@ export function openConfigWebview(context: vscode.ExtensionContext): void {
                     }
                     break;
                 }
+                case 'diagnoseEnvironment': {
+                    const cfg = message.config as ProxyConfig;
+                    log('🔍 配置页：检测 hosts / 中继 / 内置组件…');
+                    try {
+                        const items = await collectDiagnostics(context.extensionPath, cfg);
+                        panel?.webview.postMessage({ command: 'environmentResults', items });
+                    } catch (e: any) {
+                        logError(`环境检测失败: ${e?.message || e}`);
+                        panel?.webview.postMessage({
+                            command: 'environmentResults',
+                            items: [],
+                            error: e?.message || String(e),
+                        });
+                    }
+                    break;
+                }
+                case 'runPrepareEnvironment': {
+                    const cfg = message.config as ProxyConfig;
+                    await preparePrivilegedEnvironment(cfg);
+                    break;
+                }
+                case 'installSudoHelper':
+                    installSudoHelper(context);
+                    break;
             }
         },
         undefined,
@@ -298,6 +325,61 @@ function getWebviewContent(config: ProxyConfig): string {
             vertical-align: middle;
         }
         @keyframes spin { to { transform: rotate(360deg); } }
+
+        .env-block { margin-top: 8px; }
+        .env-actions {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 8px;
+            align-items: center;
+            margin-bottom: 10px;
+        }
+        .env-diagnostics-wrap {
+            display: none;
+            margin-top: 10px;
+            border: 1px solid var(--vscode-widget-border, #333);
+            border-radius: 6px;
+            overflow: hidden;
+        }
+        .env-diagnostics-toolbar {
+            display: flex;
+            flex-wrap: wrap;
+            align-items: center;
+            gap: 8px 12px;
+            padding: 8px 10px;
+            background: var(--vscode-editorWidget-background, rgba(127, 127, 127, 0.12));
+            border-bottom: 1px solid var(--vscode-widget-border, #333);
+        }
+        .env-diagnostics-toolbar button {
+            flex-shrink: 0;
+        }
+        .env-diagnostics-summary {
+            font-size: 11px;
+            color: var(--vscode-descriptionForeground);
+            line-height: 1.4;
+        }
+        .env-results {
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+            max-height: 320px;
+            overflow-y: auto;
+            padding: 10px 10px 12px;
+        }
+        .env-results.collapsed {
+            display: none !important;
+        }
+        .env-item {
+            border: 1px solid var(--vscode-widget-border, #333);
+            border-radius: 6px;
+            padding: 10px 12px;
+            font-size: 12px;
+        }
+        .env-item.ok { border-left: 3px solid var(--vscode-testing-iconPassed, #3fb950); }
+        .env-item.bad { border-left: 3px solid var(--vscode-testing-iconFailed, #f85149); }
+        .env-title { font-weight: 600; margin-bottom: 4px; }
+        .env-detail { color: var(--vscode-descriptionForeground); }
+        .env-hint { color: var(--vscode-descriptionForeground); font-size: 11px; margin-top: 6px; }
     </style>
 </head>
 <body>
@@ -379,8 +461,38 @@ function getWebviewContent(config: ProxyConfig): string {
             <div class="form-input-group">
                 <div class="checkbox-row">
                     <input type="checkbox" id="autoStart" ${config.autoStart ? 'checked' : ''} />
-                    <span class="hint">打开编辑器时自动启动代理</span>
+                    <span class="hint">打开编辑器时自动启动代理（脚本内已含 hosts + 中继，无需再勾下方项）</span>
                 </div>
+            </div>
+        </div>
+        <div class="form-row">
+            <div class="form-label">自动准备 hosts/中继</div>
+            <div class="form-input-group">
+                <div class="checkbox-row">
+                    <input type="checkbox" id="autoPrepareHostsRelay" ${config.autoPrepareHostsRelay !== false ? 'checked' : ''} />
+                    <span class="hint">已安装免密 sudo helper、且未开「自动启动」时：启动编辑器后若 hosts 或 SNI 中继未就绪，自动执行「准备特权环境」。免密只省去密码，不会单独完成写 hosts。</span>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- 环境与流程（hosts / 中继） -->
+    <div class="section">
+        <div class="section-title">🖥 环境与流程状态</div>
+        <p class="hint">检测使用<strong>当前表单</strong>（与是否点「保存」无关）。<strong>SNI 中继</strong> 成功启动后才会生成 <code>/tmp/antigravity-relay.pid</code>；仅点「检测」不会启动任何进程。</p>
+        <p class="hint">若尚未执行过第 4 步：先点 <strong>「准备特权环境」</strong>。厌烦每次输密码：点下方 <strong>「安装免密 sudo」</strong>，或在命令面板搜索 <strong>「一次性安装免密 sudo」</strong>（仅首次要密码）。完成后再点「检测」。</p>
+        <div class="env-block">
+            <div class="env-actions">
+                <button class="secondary" id="btnPrepareEnv" onclick="runPrepareEnv()">🔧 准备特权环境（hosts + relay）</button>
+                <button class="secondary" id="btnInstallSudoEnv" onclick="runInstallSudoHelper()">🔐 安装免密 sudo（首次需密码）</button>
+                <button class="secondary" id="btnEnvCheck" onclick="checkEnvironment()">🔎 检测 hosts / 中继与流程</button>
+            </div>
+            <div id="env-diagnostics-wrap" class="env-diagnostics-wrap">
+                <div class="env-diagnostics-toolbar">
+                    <button type="button" class="secondary" id="btnToggleEnvResults" onclick="toggleEnvResultsPanel()">▼ 收起检测结果</button>
+                    <span id="env-diagnostics-summary" class="env-diagnostics-summary"></span>
+                </div>
+                <div id="env-results" class="env-results"></div>
             </div>
         </div>
     </div>
@@ -403,6 +515,7 @@ function getWebviewContent(config: ProxyConfig): string {
 
                 antigravityAppPath: document.getElementById('antigravityAppPath').value,
                 autoStart: document.getElementById('autoStart').checked,
+                autoPrepareHostsRelay: document.getElementById('autoPrepareHostsRelay').checked,
             };
         }
 
@@ -430,6 +543,101 @@ function getWebviewContent(config: ProxyConfig): string {
 
         function detectAntigravity() {
             vscode.postMessage({ command: 'detectAntigravity' });
+        }
+
+        function runPrepareEnv() {
+            vscode.postMessage({ command: 'runPrepareEnvironment', config: getFormValues() });
+        }
+
+        function runInstallSudoHelper() {
+            vscode.postMessage({ command: 'installSudoHelper' });
+        }
+
+        function showEnvDiagnosticsShell(expanded) {
+            const shell = document.getElementById('env-diagnostics-wrap');
+            const results = document.getElementById('env-results');
+            const toggle = document.getElementById('btnToggleEnvResults');
+            shell.style.display = 'block';
+            if (expanded) {
+                results.classList.remove('collapsed');
+                toggle.textContent = '▼ 收起检测结果';
+            } else {
+                results.classList.add('collapsed');
+                toggle.textContent = '▶ 展开检测结果';
+            }
+        }
+
+        function toggleEnvResultsPanel() {
+            const results = document.getElementById('env-results');
+            const toggle = document.getElementById('btnToggleEnvResults');
+            const collapsed = results.classList.toggle('collapsed');
+            toggle.textContent = collapsed ? '▶ 展开检测结果' : '▼ 收起检测结果';
+        }
+
+        function updateEnvDiagnosticsSummary(items, errorText) {
+            const el = document.getElementById('env-diagnostics-summary');
+            if (errorText) {
+                el.textContent = '检测出错';
+                return;
+            }
+            const list = items || [];
+            const bad = list.filter(function(i) { return !i.ok; }).length;
+            el.textContent = list.length
+                ? ('共 ' + list.length + ' 项' + (bad ? '，' + bad + ' 项需关注' : '，均正常'))
+                : '';
+        }
+
+        function checkEnvironment() {
+            const btn = document.getElementById('btnEnvCheck');
+            btn.disabled = true;
+            btn.textContent = '检测中…';
+            showEnvDiagnosticsShell(true);
+            const wrap = document.getElementById('env-results');
+            wrap.innerHTML = '<span class="hint">正在读取本机状态…</span>';
+            document.getElementById('env-diagnostics-summary').textContent = '检测中…';
+            vscode.postMessage({ command: 'diagnoseEnvironment', config: getFormValues() });
+        }
+
+        function renderEnvResults(items, errorText) {
+            const wrap = document.getElementById('env-results');
+            wrap.innerHTML = '';
+            updateEnvDiagnosticsSummary(items, errorText);
+            if (errorText) {
+                const err = document.createElement('div');
+                err.className = 'env-item bad';
+                err.textContent = errorText;
+                wrap.appendChild(err);
+                showEnvDiagnosticsShell(true);
+                return;
+            }
+            (items || []).forEach(function(it) {
+                const div = document.createElement('div');
+                div.className = 'env-item ' + (it.ok ? 'ok' : 'bad');
+                const t = document.createElement('div');
+                t.className = 'env-title';
+                t.textContent = it.title + (it.ok ? ' ✓' : ' ✗');
+                const d = document.createElement('div');
+                d.className = 'env-detail';
+                d.textContent = it.detail;
+                div.appendChild(t);
+                div.appendChild(d);
+                if (it.hint) {
+                    const h = document.createElement('div');
+                    h.className = 'env-hint';
+                    h.textContent = it.hint;
+                    div.appendChild(h);
+                }
+                if (it.key === 'sudo_helper' && !it.ok) {
+                    const b = document.createElement('button');
+                    b.className = 'secondary';
+                    b.style.marginTop = '10px';
+                    b.textContent = '🔐 立即安装免密 sudo';
+                    b.onclick = function() { vscode.postMessage({ command: 'installSudoHelper' }); };
+                    div.appendChild(b);
+                }
+                wrap.appendChild(div);
+            });
+            showEnvDiagnosticsShell(true);
         }
 
         function showBanner(type, msg) {
@@ -517,6 +725,13 @@ function getWebviewContent(config: ProxyConfig): string {
                     if (input && msg.path) {
                         input.value = msg.path;
                     }
+                    break;
+                }
+                case 'environmentResults': {
+                    const btn = document.getElementById('btnEnvCheck');
+                    btn.disabled = false;
+                    btn.textContent = '🔎 检测 hosts / 中继与流程';
+                    renderEnvResults(msg.items, msg.error || '');
                     break;
                 }
             }

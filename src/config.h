@@ -22,6 +22,13 @@ static Config global_config = {
     .type            = "socks5"
 };
 
+static inline bool is_line_key(const char* line, const char* key) {
+    const char* p = line;
+    while (*p == ' ' || *p == '\t') p++; // 跳过前导空格
+    size_t klen = strlen(key);
+    return (strncmp(p, key, klen) == 0 && p[klen] == ':');
+}
+
 static inline void load_config(const char* path) {
     FILE* f = fopen(path, "r");
     if (!f) {
@@ -31,27 +38,27 @@ static inline void load_config(const char* path) {
 
     char line[512];
     while (fgets(line, sizeof(line), f)) {
-        if (strstr(line, "host:")) {
+        if (is_line_key(line, "host")) {
             char* val = strchr(line, ':') + 1;
             while (*val == ' ' || *val == '"') val++;
             char* end = val + strlen(val) - 1;
-            while (*end == ' ' || *end == '\n' || *end == '\r' || *end == '"') *end-- = '\0';
+            while (end >= val && (*end == ' ' || *end == '\n' || *end == '\r' || *end == '"')) *end-- = '\0';
             strncpy(global_config.host, val, 255);
-        } else if (strstr(line, "port:")) {
+        } else if (is_line_key(line, "port")) {
             char* val = strchr(line, ':') + 1;
             global_config.port = atoi(val);
-        } else if (strstr(line, "timeout:")) {
+        } else if (is_line_key(line, "timeout")) {
             char* val = strchr(line, ':') + 1;
             global_config.timeout_ms = atoi(val);
-        } else if (strstr(line, "child_injection:")) {
+        } else if (is_line_key(line, "child_injection")) {
             char* val = strchr(line, ':') + 1;
             while (*val == ' ') val++;
             global_config.child_injection = (strncmp(val, "true", 4) == 0);
-        } else if (strstr(line, "type:")) {
+        } else if (is_line_key(line, "type")) {
             char* val = strchr(line, ':') + 1;
             while (*val == ' ' || *val == '"') val++;
             char* end = val + strlen(val) - 1;
-            while (*end == ' ' || *end == '\n' || *end == '\r' || *end == '"') *end-- = '\0';
+            while (end >= val && (*end == ' ' || *end == '\n' || *end == '\r' || *end == '"')) *end-- = '\0';
             strncpy(global_config.type, val, sizeof(global_config.type) - 1);
         }
     }

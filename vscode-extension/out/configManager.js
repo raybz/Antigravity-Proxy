@@ -59,6 +59,7 @@ function getConfig() {
         timeout: cfg.get('timeout', 5000),
         antigravityAppPath: appPath,
         autoStart: cfg.get('autoStart', false),
+        autoPrepareHostsRelay: cfg.get('autoPrepareHostsRelay', true),
     };
 }
 /**
@@ -83,6 +84,9 @@ async function updateConfig(config) {
     }
     if (config.autoStart !== undefined) {
         await cfg.update('autoStart', config.autoStart, vscode.ConfigurationTarget.Global);
+    }
+    if (config.autoPrepareHostsRelay !== undefined) {
+        await cfg.update('autoPrepareHostsRelay', config.autoPrepareHostsRelay, vscode.ConfigurationTarget.Global);
     }
     (0, logger_1.log)('配置已更新到 VS Code settings');
 }

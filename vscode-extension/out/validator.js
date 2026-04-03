@@ -34,6 +34,7 @@ var __importStar = (this && this.__importStar) || (function () {
 })();
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.validateProxyConnection = validateProxyConnection;
+exports.validateSocks5Handshake = validateSocks5Handshake;
 exports.validatePort = validatePort;
 exports.validateHost = validateHost;
 exports.validatePath = validatePath;
@@ -47,15 +48,15 @@ const logger_1 = require("./logger");
 /**
  * 校验代理连通性：尝试 TCP 连接 host:port
  */
-async function validateProxyConnection(host, port) {
+async function validateProxyConnection(host, port, timeoutMs = 3000) {
     return new Promise((resolve) => {
         const socket = new net.Socket();
-        const timeout = 3000;
+        const timeout = Math.min(Math.max(timeoutMs, 500), 60000);
         socket.setTimeout(timeout);
         socket.on('connect', () => {
             socket.destroy();
             (0, logger_1.logSuccess)(`代理连通性检测通过: ${host}:${port}`);
-            resolve({ field: 'proxy', valid: true, message: `✅ 代理 ${host}:${port} 连接成功` });
+            resolve({ field: 'proxy', valid: true, message: `✅ 代理 ${host}:${port} TCP 连通` });
         });
         socket.on('timeout', () => {
             socket.destroy();
@@ -66,6 +67,52 @@ async function validateProxyConnection(host, port) {
             socket.destroy();
             (0, logger_1.logError)(`代理连接失败: ${err.message}`);
             resolve({ field: 'proxy', valid: false, message: `❌ 连接失败: ${err.message}` });
+        });
+        socket.connect(port, host);
+    });
+}
+/**
+ * SOCKS5 无认证握手：发送 VER/NMETHODS，期望 0x05 0x00
+ */
+async function validateSocks5Handshake(host, port, timeoutMs = 3000) {
+    return new Promise((resolve) => {
+        const socket = new net.Socket();
+        const timeout = Math.min(Math.max(timeoutMs, 500), 60000);
+        let settled = false;
+        const finish = (valid, message) => {
+            if (settled) {
+                return;
+            }
+            settled = true;
+            try {
+                socket.destroy();
+            }
+            catch {
+                /* ignore */
+            }
+            resolve({ field: 'proxy_socks5', valid, message });
+        };
+        socket.setTimeout(timeout);
+        socket.once('connect', () => {
+            socket.write(Buffer.from([0x05, 0x01, 0x00]));
+        });
+        socket.once('timeout', () => {
+            (0, logger_1.logError)(`SOCKS5 握手超时: ${host}:${port}`);
+            finish(false, `❌ SOCKS5 握手超时 (${timeout}ms)`);
+        });
+        socket.once('error', (err) => {
+            (0, logger_1.logError)(`SOCKS5 握手失败: ${err.message}`);
+            finish(false, `❌ SOCKS5 握手失败: ${err.message}`);
+        });
+        socket.once('data', (data) => {
+            if (data.length >= 2 && data[0] === 0x05 && data[1] === 0x00) {
+                (0, logger_1.logSuccess)(`SOCKS5 握手成功: ${host}:${port}`);
+                finish(true, `✅ SOCKS5 无认证协商成功`);
+            }
+            else {
+                const preview = data.slice(0, 8).toString('hex');
+                finish(false, `❌ 非法 SOCKS5 应答: ${preview}`);
+            }
         });
         socket.connect(port, host);
     });

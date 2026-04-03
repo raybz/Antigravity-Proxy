@@ -158,7 +158,7 @@ kill:
 #      （language_server 用 Go 原生 DNS，Go DNS 解析器会先读 /etc/hosts）
 #   2. 在端口 443 启动 SNI 中继（需要 sudo 绑定特权端口）
 #   3. language_server 连接 127.0.0.1:443 → 中继读 TLS SNI → SOCKS5 → 10808
-#   4. 退出时自动清理 /etc/hosts 并刷新 DNS 缓存
+#   4. 关闭 Antigravity 后保留 hosts/中继（曾误用 EXIT trap 会在退出 app 时清掉，已改为 exec + 仅 INT/TERM）
 #
 run: $(TARGET) $(RELAY) $(SIGN_STAMP) kill
 	@printf '\033[34m[4/4] 注入启动 Antigravity ...\033[0m\n'
@@ -187,7 +187,7 @@ run: $(TARGET) $(RELAY) $(SIGN_STAMP) kill
 		sudo dscacheutil -flushcache 2>/dev/null; \
 		sudo killall -HUP mDNSResponder 2>/dev/null; \
 	}; \
-	trap cleanup EXIT INT TERM; \
+	trap cleanup INT TERM; \
 	\
 	printf '\033[90m      写入 /etc/hosts（Go DNS 解析器优先读此文件）...\033[0m\n'; \
 	for DOMAIN in $$DOMAINS; do \
@@ -211,6 +211,7 @@ run: $(TARGET) $(RELAY) $(SIGN_STAMP) kill
 	fi; \
 	printf '\033[32m      ✓ 中继运行中 (pid=%d, port=443)\033[0m\n\n' "$$RELAY_PID"; \
 	\
+	exec env \
 	DYLD_INSERT_LIBRARIES="$$DYLIB" \
 	ANTIGRAVITY_CONFIG="$$CONFIG" \
 	ALL_PROXY="$$ALL_PROXY" \
@@ -237,4 +238,4 @@ help:
 	@printf '\n\033[1m透明代理说明：\033[0m\n'
 	@printf '  make run 先写 /etc/hosts（Go DNS 先读此文件），再 sudo 启动 SNI 中继 :443\n'
 	@printf '  googleapis 流量: 127.0.0.1:443 → 中继读 TLS SNI → SOCKS5:10808\n'
-	@printf '  退出时自动清理 /etc/hosts 并刷新 DNS 缓存\n'
+	@printf '  正常退出 Antigravity 不会清 hosts；若在终端按 Ctrl+C 中断流程会触发清理\n'

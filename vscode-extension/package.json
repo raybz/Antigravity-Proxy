@@ -2,7 +2,7 @@
   "name": "antigravity-proxy",
   "displayName": "Antigravity Proxy",
   "description": "macOS 透明代理注入工具 — 为 Antigravity 助手提供全流程自动化代理方案（编译、签名、注入、状态监控）。",
-  "version": "0.0.1",
+  "version": "0.0.4",
   "publisher": "ray2666",
   "author": "ray",
   "repository": {
@@ -61,6 +61,31 @@
         "command": "antigravity-proxy.openSettings",
         "title": "⚙️ 打开配置页面",
         "category": "Antigravity Proxy"
+      },
+      {
+        "command": "antigravity-proxy.openDiagnostics",
+        "title": "📊 环境诊断与状态",
+        "category": "Antigravity Proxy"
+      },
+      {
+        "command": "antigravity-proxy.testUpstreamProxy",
+        "title": "🔌 检测上游代理（TCP + SOCKS5）",
+        "category": "Antigravity Proxy"
+      },
+      {
+        "command": "antigravity-proxy.prepareEnvironment",
+        "title": "🔧 准备特权环境（hosts + relay，需 sudo）",
+        "category": "Antigravity Proxy"
+      },
+      {
+        "command": "antigravity-proxy.cleanupEnvironment",
+        "title": "🧹 清理 hosts 与中继",
+        "category": "Antigravity Proxy"
+      },
+      {
+        "command": "antigravity-proxy.installSudoHelper",
+        "title": "🔐 一次性安装免密 sudo（写入 /usr/local/bin + sudoers）",
+        "category": "Antigravity Proxy"
       }
     ],
     "configuration": {
@@ -99,6 +124,11 @@
           "type": "boolean",
           "default": false,
           "description": "启动时自动开启代理"
+        },
+        "antigravity-proxy.autoPrepareHostsRelay": {
+          "type": "boolean",
+          "default": true,
+          "description": "已安装免密 sudo helper 且未开「自动启动代理」时：扩展激活后若检测到 hosts/SNI 中继未就绪，自动执行「准备特权环境」。免密仅免除 sudo 密码，不会替代此步骤。"
         }
       }
     }

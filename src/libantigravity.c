@@ -318,9 +318,6 @@ static int is_relay_domain(const char *hostname) {
         ".gstatic.com",
         ".googlevideo.com",
         ".googleusercontent.com",
-        ".googleapis.com",
-        "googleapis.com",
-        "google.com",
         NULL
     };
     size_t hlen = strlen(hostname);

@@ -11,6 +11,8 @@ export interface ProxyConfig {
     timeout: number;
     antigravityAppPath: string;
     autoStart: boolean;
+    /** 已装免密 helper 时，激活后若 hosts/中继未就绪则自动执行「准备特权环境」 */
+    autoPrepareHostsRelay: boolean;
 }
 
 const CONFIG_SECTION = 'antigravity-proxy';
@@ -33,6 +35,7 @@ export function getConfig(): ProxyConfig {
         timeout: cfg.get<number>('timeout', 5000),
         antigravityAppPath: appPath,
         autoStart: cfg.get<boolean>('autoStart', false),
+        autoPrepareHostsRelay: cfg.get<boolean>('autoPrepareHostsRelay', true),
     };
 }
 
@@ -60,6 +63,9 @@ export async function updateConfig(config: Partial<ProxyConfig>): Promise<void> 
     }
     if (config.autoStart !== undefined) {
         await cfg.update('autoStart', config.autoStart, vscode.ConfigurationTarget.Global);
+    }
+    if (config.autoPrepareHostsRelay !== undefined) {
+        await cfg.update('autoPrepareHostsRelay', config.autoPrepareHostsRelay, vscode.ConfigurationTarget.Global);
     }
 
     log('配置已更新到 VS Code settings');

@@ -33,52 +33,37 @@ var __importStar = (this && this.__importStar) || (function () {
     };
 })();
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.createStatusBar = createStatusBar;
-exports.updateStatus = updateStatus;
-exports.dispose = dispose;
+exports.createRuntimeIndicator = createRuntimeIndicator;
+exports.setRuntimeIndicator = setRuntimeIndicator;
 const vscode = __importStar(require("vscode"));
-let statusBarItem;
-const STATUS_MAP = {
-    'running': {
-        text: '$(check) AG-Proxy: Running',
-        tooltip: '代理运行中，点击停止',
-        command: 'antigravity-proxy.stop',
-    },
-    'stopped': {
-        text: '$(circle-slash) AG-Proxy: Stopped',
-        tooltip: '代理已停止，点击启动',
-        command: 'antigravity-proxy.start',
-    },
-    'starting': {
-        text: '$(sync~spin) AG-Proxy: Starting...',
-        tooltip: '正在启动代理...',
-        command: '',
-    },
-    'not-configured': {
-        text: '$(warning) AG-Proxy: 未配置',
-        tooltip: '点击打开配置页面',
-        command: 'antigravity-proxy.openSettings',
-    },
-};
-function createStatusBar() {
-    if (!statusBarItem) {
-        statusBarItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 100);
-        statusBarItem.show();
+let item;
+function createRuntimeIndicator() {
+    if (!item) {
+        item = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 48);
+        item.command = 'antigravity-proxy.openSettings';
+        item.show();
     }
-    updateStatus('stopped');
-    return statusBarItem;
+    setRuntimeIndicator('bad');
+    return new vscode.Disposable(() => {
+        item?.dispose();
+        item = undefined;
+    });
 }
-function updateStatus(status) {
-    if (!statusBarItem) {
+function setRuntimeIndicator(state) {
+    if (!item) {
         return;
     }
-    const info = STATUS_MAP[status];
-    statusBarItem.text = info.text;
-    statusBarItem.tooltip = info.tooltip;
-    statusBarItem.command = info.command || undefined;
+    if (state === 'ok') {
+        item.text = '🟢 AG-Proxy';
+        item.tooltip = '运行正常（hosts / 中继 / 应用 / 上游检测均已通过）· 点击打开配置';
+    }
+    else if (state === 'starting') {
+        item.text = '🟡 AG-Proxy';
+        item.tooltip = '等待检测通过（hosts / 中继 / 应用 / 上游等）· 点击打开配置';
+    }
+    else {
+        item.text = '🔴 AG-Proxy';
+        item.tooltip = '未运行或未就绪 · 点击打开配置';
+    }
 }
-function dispose() {
-    statusBarItem?.dispose();
-    statusBarItem = undefined;
-}
-//# sourceMappingURL=statusBar.js.map
+//# sourceMappingURL=statusIndicator.js.map

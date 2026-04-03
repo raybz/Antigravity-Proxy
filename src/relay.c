@@ -62,38 +62,36 @@ static void rlog(const char *fmt, ...) {
  * Returns a pointer to a static buffer containing the SNI hostname,
  * or NULL if not found / not a TLS ClientHello.
  */
-static const char *parse_sni(const uint8_t *buf, ssize_t len) {
-    static char sni[256];
-
+static int parse_sni(const uint8_t *buf, ssize_t len, char *out, size_t out_size) {
     /* Must be at least a TLS record header + handshake header */
-    if (len < 9) return NULL;
+    if (len < 9) return -1;
     /* Content type: 0x16 = handshake */
-    if (buf[0] != 0x16) return NULL;
+    if (buf[0] != 0x16) return -1;
     /* Handshake type: 0x01 = ClientHello */
-    if (buf[5] != 0x01) return NULL;
+    if (buf[5] != 0x01) return -1;
 
     /* p points to start of ClientHello body (after handshake header) */
     const uint8_t *p   = buf + 9;
     const uint8_t *end = buf + len;
 
     /* skip client_version (2) + random (32) */
-    if (p + 34 > end) return NULL;
+    if (p + 34 > end) return -1;
     p += 34;
 
     /* skip session_id */
-    if (p >= end) return NULL;
+    if (p >= end) return -1;
     p += 1 + *p;
 
     /* skip cipher_suites */
-    if (p + 2 > end) return NULL;
+    if (p + 2 > end) return -1;
     p += 2 + ((p[0] << 8) | p[1]);
 
     /* skip compression_methods */
-    if (p >= end) return NULL;
+    if (p >= end) return -1;
     p += 1 + *p;
 
     /* extensions */
-    if (p + 2 > end) return NULL;
+    if (p + 2 > end) return -1;
     uint16_t ext_total = (uint16_t)((p[0] << 8) | p[1]);
     p += 2;
     const uint8_t *ext_end = p + ext_total;
@@ -106,23 +104,23 @@ static const char *parse_sni(const uint8_t *buf, ssize_t len) {
 
         if (ext_type == 0x0000) {
             /* server_name extension */
-            if (p + 5 > ext_end) return NULL;
+            if (p + 5 > ext_end) return -1;
             /* server_name_list_length (2) */
             p += 2;
             /* name_type (1): 0x00 = host_name */
-            if (*p != 0x00) return NULL;
+            if (*p != 0x00) return -1;
             p++;
             uint16_t name_len = (uint16_t)((p[0] << 8) | p[1]);
             p += 2;
-            if (p + name_len > ext_end) return NULL;
-            if (name_len >= sizeof(sni)) return NULL;
-            memcpy(sni, p, name_len);
-            sni[name_len] = '\0';
-            return sni;
+            if (p + name_len > ext_end) return -1;
+            if (name_len >= out_size) return -1;
+            memcpy(out, p, name_len);
+            out[name_len] = '\0';
+            return 0;
         }
         p += ext_dlen;
     }
-    return NULL;
+    return -1;
 }
 
 /* ── SOCKS5 handshake ─────────────────────────────────────────────── */
@@ -196,14 +194,12 @@ done:
 static void *handle_conn(void *arg) {
     int client = (int)(intptr_t)arg;
 
-    /* Read the first chunk to detect SNI */
     uint8_t peek[PEEK_BUF];
     ssize_t peeked = recv(client, peek, sizeof(peek), MSG_PEEK);
     if (peeked <= 0) { close(client); return NULL; }
 
-    const char *sni = parse_sni(peek, peeked);
-
-    if (!sni) {
+    char sni[256];
+    if (parse_sni(peek, peeked, sni, sizeof(sni)) != 0) {
         /* Not TLS or couldn't parse SNI — fallback: just proxy raw bytes */
         rlog("no SNI found, closing (fd=%d)", client);
         close(client);
@@ -252,28 +248,25 @@ static void *handle_conn(void *arg) {
     /* Bidirectional pipe */
     struct pipe_arg *p1 = malloc(sizeof(*p1));
     struct pipe_arg *p2 = malloc(sizeof(*p2));
+    if (!p1 || !p2) {
+        free(p1); free(p2);
+        close(client); close(proxy);
+        return NULL;
+    }
+
     p1->a = client; p1->b = proxy;
     p2->a = proxy;  p2->b = client;
 
     pthread_t t;
-    pthread_create(&t, NULL, pipe_thread, p2);
+    if (pthread_create(&t, NULL, pipe_thread, p2) != 0) {
+        free(p1); free(p2);
+        close(client); close(proxy);
+        return NULL;
+    }
     pthread_detach(t);
 
     /* Use current thread for client→proxy direction */
-    uint8_t buf[BUF_SIZE];
-    ssize_t n;
-    while ((n = read(client, buf, sizeof(buf))) > 0) {
-        ssize_t total = 0;
-        while (total < n) {
-            ssize_t w = write(proxy, buf + total, (size_t)(n - total));
-            if (w <= 0) goto done;
-            total += w;
-        }
-    }
-done:
-    shutdown(proxy, SHUT_WR);
-    free(p1);
-    close(client);
+    pipe_thread(p1);
     return NULL;
 }
 
