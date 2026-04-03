@@ -7,10 +7,6 @@
 <p align="center"><sub>VS Code / Cursor 扩展详情只会渲染本文件；跳转「另一个 .md」无效，请用上方锚点在本页内切换。<br/>
 The Extensions panel only previews this file; links to <code>README.zh-CN.md</code> don’t open — use the anchors above.</sub></p>
 
-<p align="center">
-  <img src="icon.png" width="96" alt="Antigravity Proxy"/>
-</p>
-
 <h1 align="center">Antigravity Proxy</h1>
 
 ---
