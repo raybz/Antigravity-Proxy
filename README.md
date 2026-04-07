@@ -16,6 +16,8 @@
 
 ## Introduction
 
+**Repository:** [github.com/raybz/Antigravity-Proxy](https://github.com/raybz/Antigravity-Proxy)
+
 `Antigravity-Proxy` fixes **Antigravity not respecting the system proxy**. Its language server uses Go’s DNS resolver and bypasses typical macOS proxy hooks. This project combines **`/etc/hosts`**, an **SNI relay on :443**, and **`DYLD_INSERT_LIBRARIES` injection** to steer traffic through your SOCKS5/HTTP proxy.
 
 | Layer | Technique | Role |

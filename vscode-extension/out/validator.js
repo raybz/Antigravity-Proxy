@@ -37,7 +37,6 @@ exports.validateProxyConnection = validateProxyConnection;
 exports.validateSocks5Handshake = validateSocks5Handshake;
 exports.validatePort = validatePort;
 exports.validateHost = validateHost;
-exports.validatePath = validatePath;
 exports.detectAntigravityPath = detectAntigravityPath;
 exports.validateAntigravityPath = validateAntigravityPath;
 exports.validateAll = validateAll;
@@ -151,18 +150,6 @@ function validateHost(host) {
         return { field: 'host', valid: true, message: '✅ localhost' };
     }
     return { field: 'host', valid: false, message: '❌ 地址格式不正确' };
-}
-/**
- * 校验路径是否存在
- */
-function validatePath(pathStr, label) {
-    if (!pathStr || pathStr.trim().length === 0) {
-        return { field: label, valid: false, message: `❌ ${label}路径不能为空` };
-    }
-    if (fs.existsSync(pathStr)) {
-        return { field: label, valid: true, message: `✅ ${label}路径有效` };
-    }
-    return { field: label, valid: false, message: `❌ 路径不存在: ${pathStr}` };
 }
 /**
  * 校验项目目录（需要包含 Makefile 和 src/）

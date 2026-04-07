@@ -2,8 +2,8 @@
   "name": "antigravity-proxy",
   "displayName": "Antigravity Proxy",
   "description": "macOS 透明代理注入工具 — 为 Antigravity 助手提供全流程自动化代理方案（编译、签名、注入、状态监控）。",
-  "version": "0.0.4",
-  "publisher": "ray2666",
+  "version": "0.0.6",
+  "publisher": "raybz",
   "author": "ray",
   "repository": {
     "type": "git",
@@ -83,6 +83,16 @@
         "category": "Antigravity Proxy"
       },
       {
+        "command": "antigravity-proxy.restoreStock",
+        "title": "🛑 恢复默认（清 hosts/中继 + 移除注入）",
+        "category": "Antigravity Proxy"
+      },
+      {
+        "command": "antigravity-proxy.restoreNoProxy",
+        "title": "🔕 完全停用代理（网络与未使用本扩展一致）",
+        "category": "Antigravity Proxy"
+      },
+      {
         "command": "antigravity-proxy.installSudoHelper",
         "title": "🔐 一次性安装免密 sudo（写入 /usr/local/bin + sudoers）",
         "category": "Antigravity Proxy"
@@ -129,6 +139,11 @@
           "type": "boolean",
           "default": true,
           "description": "已安装免密 sudo helper 且未开「自动启动代理」时：扩展激活后若检测到 hosts/SNI 中继未就绪，自动执行「准备特权环境」。免密仅免除 sudo 密码，不会替代此步骤。"
+        },
+        "antigravity-proxy.showStatusBar": {
+          "type": "boolean",
+          "default": true,
+          "description": "在状态栏右侧显示「AG-Proxy」运行状态（绿/黄/红）。关闭后不占用状态栏，扩展功能仍可通过命令面板与配置页使用。"
         }
       }
     }

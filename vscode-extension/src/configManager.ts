@@ -13,9 +13,30 @@ export interface ProxyConfig {
     autoStart: boolean;
     /** 已装免密 helper 时，激活后若 hosts/中继未就绪则自动执行「准备特权环境」 */
     autoPrepareHostsRelay: boolean;
+    /** 是否在右下角状态栏显示 AG-Proxy 状态指示 */
+    showStatusBar: boolean;
 }
 
 const CONFIG_SECTION = 'antigravity-proxy';
+
+/**
+ * WebView postMessage 在部分环境下会把 number 序列成 string，合并为严格类型，避免写入或校验异常。
+ */
+export function normalizeProxyConfigFromUI(raw: unknown): ProxyConfig {
+    const o = raw && typeof raw === 'object' ? (raw as Record<string, unknown>) : {};
+    const portNum = Math.trunc(Number(o.port));
+    const timeoutNum = Math.trunc(Number(o.timeout));
+    return {
+        host: String(o.host ?? '').trim(),
+        port: Number.isFinite(portNum) ? portNum : 0,
+        type: o.type === 'http' ? 'http' : 'socks5',
+        timeout: Number.isFinite(timeoutNum) && timeoutNum >= 1000 ? timeoutNum : 5000,
+        antigravityAppPath: String(o.antigravityAppPath ?? '').trim(),
+        autoStart: o.autoStart === true,
+        autoPrepareHostsRelay: o.autoPrepareHostsRelay !== false,
+        showStatusBar: o.showStatusBar !== false,
+    };
+}
 
 /**
  * 从 VS Code settings 读取完整配置
@@ -36,39 +57,121 @@ export function getConfig(): ProxyConfig {
         antigravityAppPath: appPath,
         autoStart: cfg.get<boolean>('autoStart', false),
         autoPrepareHostsRelay: cfg.get<boolean>('autoPrepareHostsRelay', true),
+        showStatusBar: cfg.get<boolean>('showStatusBar', true),
     };
+}
+
+/**
+ * 将若干键写入用户 / 工作区 / 各文件夹，避免 .vscode/settings.json 覆盖 Global 导致「保存不生效」
+ */
+async function applySettingsToAllScopes(entries: Array<[string, unknown]>): Promise<void> {
+    const applyAt = async (target: vscode.ConfigurationTarget) => {
+        const cfg = vscode.workspace.getConfiguration(CONFIG_SECTION);
+        for (const [key, value] of entries) {
+            try {
+                await cfg.update(key, value, target);
+            } catch (e: any) {
+                log(`写入 ${key} @${target} 失败: ${e?.message || e}`);
+            }
+        }
+    };
+
+    await applyAt(vscode.ConfigurationTarget.Global);
+
+    if ((vscode.workspace.workspaceFolders?.length ?? 0) > 0) {
+        await applyAt(vscode.ConfigurationTarget.Workspace);
+    }
+
+    for (const folder of vscode.workspace.workspaceFolders ?? []) {
+        const scoped = vscode.workspace.getConfiguration(CONFIG_SECTION, folder.uri);
+        for (const [key, value] of entries) {
+            try {
+                await scoped.update(key, value, vscode.ConfigurationTarget.WorkspaceFolder);
+            } catch (e: any) {
+                log(`写入 ${key} @文件夹「${folder.name}」失败: ${e?.message || e}`);
+            }
+        }
+    }
 }
 
 /**
  * 将配置写回 VS Code settings
  */
 export async function updateConfig(config: Partial<ProxyConfig>): Promise<void> {
-    const cfg = vscode.workspace.getConfiguration(CONFIG_SECTION);
-
-    if (config.host !== undefined) {
-        await cfg.update('proxyHost', config.host, vscode.ConfigurationTarget.Global);
-    }
-    if (config.port !== undefined) {
-        await cfg.update('proxyPort', config.port, vscode.ConfigurationTarget.Global);
-    }
-    if (config.type !== undefined) {
-        await cfg.update('proxyType', config.type, vscode.ConfigurationTarget.Global);
-    }
-    if (config.timeout !== undefined) {
-        await cfg.update('timeout', config.timeout, vscode.ConfigurationTarget.Global);
+    if (config.host !== undefined || config.port !== undefined || config.type !== undefined || config.timeout !== undefined) {
+        const cur = getConfig();
+        const host = (config.host !== undefined ? config.host : cur.host).trim();
+        const portRaw = config.port !== undefined ? config.port : cur.port;
+        const port = Math.trunc(Number(portRaw));
+        const type = config.type !== undefined ? config.type : cur.type;
+        const timeoutRaw = config.timeout !== undefined ? config.timeout : cur.timeout;
+        const timeout = Math.trunc(Number(timeoutRaw));
+        await applySettingsToAllScopes([
+            ['proxyHost', host],
+            ['proxyPort', Number.isFinite(port) ? port : cur.port],
+            ['proxyType', type === 'http' ? 'http' : 'socks5'],
+            ['timeout', Number.isFinite(timeout) && timeout >= 1000 ? timeout : cur.timeout],
+        ]);
     }
 
     if (config.antigravityAppPath !== undefined) {
-        await cfg.update('antigravityAppPath', config.antigravityAppPath, vscode.ConfigurationTarget.Global);
+        await applySettingsToAllScopes([['antigravityAppPath', config.antigravityAppPath]]);
     }
-    if (config.autoStart !== undefined) {
-        await cfg.update('autoStart', config.autoStart, vscode.ConfigurationTarget.Global);
+    if (config.autoStart !== undefined || config.autoPrepareHostsRelay !== undefined) {
+        const cur = getConfig();
+        await applyAutoLaunchToAllScopes(
+            config.autoStart !== undefined ? config.autoStart : cur.autoStart,
+            config.autoPrepareHostsRelay !== undefined ? config.autoPrepareHostsRelay : cur.autoPrepareHostsRelay
+        );
     }
-    if (config.autoPrepareHostsRelay !== undefined) {
-        await cfg.update('autoPrepareHostsRelay', config.autoPrepareHostsRelay, vscode.ConfigurationTarget.Global);
+    if (config.showStatusBar !== undefined) {
+        await applySettingsToAllScopes([['showStatusBar', config.showStatusBar]]);
     }
 
-    log('配置已更新到 VS Code settings');
+    log('配置已更新到用户 / 工作区 / 各文件夹作用域');
+}
+
+/**
+ * 将「自动启动 / 自动准备 hosts」同步到用户、工作区、各文件夹（避免仅写 Global 时被 .vscode/settings.json 覆盖）
+ */
+export async function applyAutoLaunchToAllScopes(
+    autoStart: boolean,
+    autoPrepareHostsRelay: boolean
+): Promise<void> {
+    const applyPairAt = async (target: vscode.ConfigurationTarget) => {
+        const cfg = vscode.workspace.getConfiguration(CONFIG_SECTION);
+        try {
+            await cfg.update('autoStart', autoStart, target);
+            await cfg.update('autoPrepareHostsRelay', autoPrepareHostsRelay, target);
+        } catch (e: any) {
+            log(`applyAutoLaunch: 作用域 ${target} 写入失败: ${e?.message || e}`);
+        }
+    };
+
+    await applyPairAt(vscode.ConfigurationTarget.Global);
+
+    if ((vscode.workspace.workspaceFolders?.length ?? 0) > 0) {
+        await applyPairAt(vscode.ConfigurationTarget.Workspace);
+    }
+
+    for (const folder of vscode.workspace.workspaceFolders ?? []) {
+        try {
+            const scoped = vscode.workspace.getConfiguration(CONFIG_SECTION, folder.uri);
+            await scoped.update('autoStart', autoStart, vscode.ConfigurationTarget.WorkspaceFolder);
+            await scoped.update('autoPrepareHostsRelay', autoPrepareHostsRelay, vscode.ConfigurationTarget.WorkspaceFolder);
+        } catch (e: any) {
+            log(`applyAutoLaunch: 文件夹「${folder.name}」写入失败: ${e?.message || e}`);
+        }
+    }
+
+    log(
+        `已在各作用域同步自动启动/自动准备: autoStart=${autoStart}, autoPrepareHostsRelay=${autoPrepareHostsRelay}`
+    );
+}
+
+/** 恢复原生时关闭自动拉起代理链 */
+export async function disableAutoLaunchInAllConfigScopes(): Promise<void> {
+    await applyAutoLaunchToAllScopes(false, false);
 }
 
 /**
@@ -88,11 +191,17 @@ dns:
   fakeip_range: "198.18.0.0/16"
 `;
 
-    // 始终使用临时目录作为 config.yaml 的存储位置
+    // 固定路径保证每次启动 Antigravity 读取同一份配置，不因时间戳变化而失效
     const yamlPath = path.join('/tmp', 'antigravity-config.yaml');
 
-    fs.writeFileSync(yamlPath, content, 'utf-8');
-    log(`config.yaml 已同步到 ${yamlPath}`);
+    try {
+        fs.writeFileSync(yamlPath, content, 'utf-8');
+        log(`config.yaml 已同步到 ${yamlPath}`);
+    } catch (e: any) {
+        const msg = `写入 config.yaml 失败（${yamlPath}）: ${e?.message || e}`;
+        log(`❌ ${msg}`);
+        throw new Error(msg);
+    }
     return yamlPath;
 }
 

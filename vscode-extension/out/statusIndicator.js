@@ -37,13 +37,27 @@ exports.createRuntimeIndicator = createRuntimeIndicator;
 exports.setRuntimeIndicator = setRuntimeIndicator;
 const vscode = __importStar(require("vscode"));
 let item;
+let lastState = 'bad';
+function isStatusBarEnabled() {
+    return vscode.workspace.getConfiguration('antigravity-proxy').get('showStatusBar', true);
+}
+function applyVisibility() {
+    if (!item) {
+        return;
+    }
+    if (isStatusBarEnabled()) {
+        item.show();
+    }
+    else {
+        item.hide();
+    }
+}
 function createRuntimeIndicator() {
     if (!item) {
         item = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 48);
         item.command = 'antigravity-proxy.openSettings';
-        item.show();
     }
-    setRuntimeIndicator('bad');
+    setRuntimeIndicator(lastState);
     return new vscode.Disposable(() => {
         item?.dispose();
         item = undefined;
@@ -53,6 +67,7 @@ function setRuntimeIndicator(state) {
     if (!item) {
         return;
     }
+    lastState = state;
     if (state === 'ok') {
         item.text = '🟢 AG-Proxy';
         item.tooltip = '运行正常（hosts / 中继 / 应用 / 上游检测均已通过）· 点击打开配置';
@@ -65,5 +80,6 @@ function setRuntimeIndicator(state) {
         item.text = '🔴 AG-Proxy';
         item.tooltip = '未运行或未就绪 · 点击打开配置';
     }
+    applyVisibility();
 }
 //# sourceMappingURL=statusIndicator.js.map

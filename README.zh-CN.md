@@ -16,6 +16,8 @@
 
 ## 项目介绍
 
+**开源仓库：** [github.com/raybz/Antigravity-Proxy](https://github.com/raybz/Antigravity-Proxy)
+
 `Antigravity-Proxy` 用于解决 **Antigravity AI 编程助手无法走系统代理** 的问题。其 language server 使用 Go 原生 DNS，绕过了 macOS 系统代理与常见 Hook。本项目通过 **`/etc/hosts`**、**SNI 中继（:443）** 与 **`DYLD_INSERT_LIBRARIES` 注入** 组合处理流量。
 
 | 层次 | 技术 | 作用 |

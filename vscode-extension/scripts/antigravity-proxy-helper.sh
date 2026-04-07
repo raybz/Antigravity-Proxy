@@ -54,6 +54,60 @@ cmd_cleanup_all() {
   cmd_flush_dns
 }
 
+# 移除主应用 Info.plist 中的 Antigravity 注入键（DYLD / 代理变量等），并对可执行文件重签名（与扩展内 resign 目标一致）
+# 若删完注入键后 dict 已空则一并移除 dict；若还有其他键（如 MallocNanoZone）则保留 dict 不删。
+cmd_strip_lsenvironment() {
+  bundle="${1:?用法: strip-lsenvironment /path/to/Antigravity.app}"
+  pl="${bundle}/Contents/Info.plist"
+  if [ ! -f "$pl" ]; then
+    echo "缺少 Info.plist: $pl" >&2
+    exit 1
+  fi
+  echo "[strip-lsenvironment] 移除 Antigravity 注入键 → $pl"
+  for k in DYLD_INSERT_LIBRARIES DYLD_LIBRARY_PATH ALL_PROXY HTTPS_PROXY HTTP_PROXY ANTIGRAVITY_CONFIG NO_PROXY FTP_PROXY; do
+    /usr/libexec/PlistBuddy -c "Delete :LSEnvironment:$k" "$pl" 2>/dev/null || true
+  done
+  _remaining=$(/usr/libexec/PlistBuddy -c "Print :LSEnvironment" "$pl" 2>/dev/null || true)
+  if [ -z "$_remaining" ] || echo "$_remaining" | grep -qE '^Dict[[:space:]]*\{[[:space:]]*\}[[:space:]]*$'; then
+    /usr/libexec/PlistBuddy -c "Delete :LSEnvironment" "$pl" 2>/dev/null || true
+    echo "[strip-lsenvironment] LSEnvironment dict 已清空并移除"
+  else
+    echo "[strip-lsenvironment] LSEnvironment 仍含非代理键，保留 dict：$_remaining"
+  fi
+  ent="/tmp/antigravity-proxy-strip-entitlements.$$"
+  cat >"$ent" <<'ENT'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>com.apple.security.automation.apple-events</key><true/>
+  <key>com.apple.security.cs.allow-jit</key><true/>
+  <key>com.apple.security.device.audio-input</key><true/>
+  <key>com.apple.security.device.camera</key><true/>
+  <key>com.apple.security.cs.allow-dyld-environment-variables</key><true/>
+  <key>com.apple.security.cs.disable-library-validation</key><true/>
+</dict></plist>
+ENT
+  sign_one() {
+    local f="$1"
+    if [ -f "$f" ]; then
+      echo "[strip-lsenvironment] codesign: $f"
+      codesign -f -s - --entitlements "$ent" "$f" || { rm -f "$ent"; exit 1; }
+    fi
+  }
+  sign_one "${bundle}/Contents/MacOS/Electron"
+  sign_one "${bundle}/Contents/Frameworks/Antigravity Helper.app/Contents/MacOS/Antigravity Helper"
+  sign_one "${bundle}/Contents/Frameworks/Antigravity Helper (GPU).app/Contents/MacOS/Antigravity Helper (GPU)"
+  sign_one "${bundle}/Contents/Frameworks/Antigravity Helper (Renderer).app/Contents/MacOS/Antigravity Helper (Renderer)"
+  sign_one "${bundle}/Contents/Frameworks/Antigravity Helper (Plugin).app/Contents/MacOS/Antigravity Helper (Plugin)"
+  shopt -s nullglob
+  for f in "${bundle}/Contents/Resources/app/extensions/antigravity/bin/language_server_macos_"*; do
+    sign_one "$f"
+  done
+  shopt -u nullglob
+  rm -f "$ent"
+  echo "[strip-lsenvironment] 完成"
+}
+
 case "${1:-}" in
   write-hosts) cmd_write_hosts ;;
   flush-dns) cmd_flush_dns ;;
@@ -63,8 +117,12 @@ case "${1:-}" in
     cmd_start_relay "$1" "$2" "$3"
     ;;
   cleanup-all) cmd_cleanup_all ;;
+  strip-lsenvironment)
+    shift
+    cmd_strip_lsenvironment "$1"
+    ;;
   *)
-    echo "用法: $0 write-hosts|flush-dns|stop-relay|start-relay <relay> <host> <port>|cleanup-all" >&2
+    echo "用法: $0 write-hosts|flush-dns|stop-relay|start-relay <relay> <host> <port>|cleanup-all|strip-lsenvironment <Antigravity.app>" >&2
     exit 1
     ;;
 esac

@@ -62,10 +62,27 @@ function openDiagnosticsPanel(context) {
                     if (ok) {
                         try {
                             await (0, proxyManager_1.cleanupPrivilegedEnvironment)();
-                            vscode.window.showInformationMessage('已清理 hosts 与 relay');
+                            vscode.window.showInformationMessage('已清理 hosts 与中继');
                         }
-                        catch {
-                            vscode.window.showErrorMessage('清理失败，请查看输出日志');
+                        catch (e) {
+                            const msg = e instanceof Error ? e.message : String(e);
+                            (0, logger_1.log)(`❌ 清理失败: ${msg}`);
+                            // 错误弹窗已在 cleanupPrivilegedEnvironment 内弹出，此处不重复
+                        }
+                        await postRefresh(context.extensionPath);
+                    }
+                });
+                break;
+            }
+            case 'restoreStock': {
+                showConfirm('将完全停用本扩展代理：退出 Antigravity，清理 hosts/中继，移除 LSEnvironment 并重签名。开始前请确认配置里 .app 与访达打开的为同一份（多副本/Makefile 须对同一 bundle）。完成后说明会写入输出日志（终端代理变量、系统代理、DNS、LSEnvironment 等）。是否继续？').then(async (ok) => {
+                    if (ok) {
+                        try {
+                            await (0, proxyManager_1.restoreStockBehavior)();
+                        }
+                        catch (e) {
+                            const msg = e instanceof Error ? e.message : String(e);
+                            (0, logger_1.log)(`❌ 恢复原生失败: ${msg}`);
                         }
                         await postRefresh(context.extensionPath);
                     }
@@ -84,6 +101,9 @@ function openDiagnosticsPanel(context) {
             case 'installSudoHelper':
                 (0, installHelper_1.installSudoHelper)(context);
                 break;
+            case 'openSystemProxy':
+                await vscode.env.openExternal(vscode.Uri.parse('x-apple.systempreferences:com.apple.preference.network?Proxies'));
+                break;
             default:
                 break;
         }
@@ -101,8 +121,15 @@ async function postRefresh(extensionPath) {
     }
     const config = (0, configManager_1.getConfig)();
     (0, logger_1.log)('🔍 刷新环境诊断...');
-    const items = await (0, diagnostics_1.collectDiagnostics)(extensionPath, config);
-    panel.webview.postMessage({ command: 'state', items, configSummary: summarize(config) });
+    try {
+        const items = await (0, diagnostics_1.collectDiagnostics)(extensionPath, config);
+        panel.webview.postMessage({ command: 'state', items, configSummary: summarize(config) });
+    }
+    catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        (0, logger_1.log)(`❌ 诊断收集异常: ${msg}`);
+        panel.webview.postMessage({ command: 'error', message: `诊断收集失败: ${msg}` });
+    }
 }
 function summarize(cfg) {
     return `${cfg.type}://${cfg.host}:${cfg.port} · Antigravity: ${cfg.antigravityAppPath || '(自动检测)'}`;
@@ -163,6 +190,7 @@ function getHtml() {
     <button id="btnPrepare" class="secondary">🔧 准备特权环境（hosts + relay）</button>
     <button id="btnInstallSudo" class="secondary">🔐 安装免密 sudo（首次需密码）</button>
     <button id="btnCleanup" class="secondary">🧹 仅清理 hosts + relay</button>
+    <button id="btnRestoreStock" class="secondary">🔕 完全停用代理（未使用扩展时）</button>
     <button id="btnResign" class="secondary">🔑 强制重签名</button>
     <button id="btnConfig" class="secondary">⚙️ 打开配置</button>
     <button id="btnLog" class="secondary">📋 日志</button>
@@ -205,6 +233,16 @@ function getHtml() {
           row.appendChild(go);
           li.appendChild(row);
         }
+        if (it.key === 'system_proxy' && !it.ok) {
+          const row = document.createElement('div');
+          row.style.marginTop = '8px';
+          const go = document.createElement('button');
+          go.className = 'secondary';
+          go.textContent = '🌐 前往系统设置 → 代理';
+          go.onclick = () => vscode.postMessage({ command: 'openSystemProxy' });
+          row.appendChild(go);
+          li.appendChild(row);
+        }
         list.appendChild(li);
       });
     }
@@ -216,6 +254,7 @@ function getHtml() {
     document.getElementById('btnPrepare').onclick = () => vscode.postMessage({ command: 'prepareEnv' });
     document.getElementById('btnInstallSudo').onclick = () => vscode.postMessage({ command: 'installSudoHelper' });
     document.getElementById('btnCleanup').onclick = () => vscode.postMessage({ command: 'cleanupEnv' });
+    document.getElementById('btnRestoreStock').onclick = () => vscode.postMessage({ command: 'restoreStock' });
     document.getElementById('btnResign').onclick = () => vscode.postMessage({ command: 'resign' });
     document.getElementById('btnConfig').onclick = () => vscode.postMessage({ command: 'openSettings' });
     document.getElementById('btnLog').onclick = () => vscode.postMessage({ command: 'showLog' });
@@ -226,9 +265,15 @@ function getHtml() {
         document.getElementById('loading').style.display = 'none';
         document.getElementById('summary').textContent = msg.configSummary || '';
         render(msg.items);
+      } else if (msg.command === 'error') {
+        document.getElementById('loading').style.display = 'none';
+        const list = document.getElementById('list');
+        list.innerHTML = '<li class="bad"><div class="title">诊断收集失败 <span class="badge">错误</span></div><div class="detail">' + (msg.message || '未知错误') + '</div></li>';
       }
     });
 
+    // 初始加载时显示 loading，再发请求
+    document.getElementById('loading').style.display = 'block';
     vscode.postMessage({ command: 'refresh' });
   </script>
 </body>

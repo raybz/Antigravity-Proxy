@@ -21,6 +21,10 @@ The Extensions panel only previews this file; links to <code>README.zh-CN.md</co
 
 Antigravity’s language server uses Go’s DNS stack and **does not follow the system proxy**. This extension automates `/etc/hosts`, the SNI relay, `DYLD_INSERT_LIBRARIES` injection, and codesigning inside VS Code / Cursor.
 
+### Source code
+
+Open-source project (issues & updates): [github.com/raybz/Antigravity-Proxy](https://github.com/raybz/Antigravity-Proxy)
+
 ### Features
 
 | Feature | Description |
@@ -102,6 +106,10 @@ macOS · Xcode Command Line Tools · local SOCKS5/HTTP proxy · Antigravity inst
 ### 为什么需要
 
 Antigravity 的 language server 使用 Go 原生 DNS，**不会遵循系统代理**。本扩展把写 `/etc/hosts`、启动 SNI 中继、`DYLD_INSERT_LIBRARIES` 注入与签名集中进 VS Code / Cursor。
+
+### 开源仓库
+
+源码与 issue：[github.com/raybz/Antigravity-Proxy](https://github.com/raybz/Antigravity-Proxy)
 
 ### 功能一览
 

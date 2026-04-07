@@ -34,6 +34,7 @@ var __importStar = (this && this.__importStar) || (function () {
 })();
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.collectDiagnostics = collectDiagnostics;
+exports.checkSystemProxyForWarning = checkSystemProxyForWarning;
 exports.needsPrepareEnvironmentSetup = needsPrepareEnvironmentSetup;
 exports.isProxyFullyHealthy = isProxyFullyHealthy;
 const fs = __importStar(require("fs"));
@@ -62,6 +63,10 @@ async function checkRelayProcess() {
     const pid = fs.readFileSync(runtimeConstants_1.RELAY_PID_PATH, 'utf-8').trim();
     if (!pid) {
         return { ok: false, detail: 'PID 文件为空' };
+    }
+    // 严格校验 PID 为纯数字，防止文件内容被篡改时命令注入
+    if (!/^\d+$/.test(pid)) {
+        return { ok: false, detail: `PID 文件内容非法（${pid}），请重新执行「准备特权环境」` };
     }
     try {
         await execShort(`ps -p ${pid} -o pid=`);
@@ -107,9 +112,138 @@ function readHostsStatus() {
         missing,
     };
 }
+function resolveAntigravityBundleForDiagnostics(config) {
+    const manual = (config.antigravityAppPath && config.antigravityAppPath.trim()) || '';
+    if (manual && fs.existsSync(manual)) {
+        return manual;
+    }
+    return (0, validator_1.detectAntigravityPath)() || '';
+}
+/** Antigravity 注入相关的 LSEnvironment 键；只要有其中之一存在就判为异常 */
+const ANTIGRAVITY_LSENVIRONMENT_KEYS = [
+    'DYLD_INSERT_LIBRARIES',
+    'DYLD_LIBRARY_PATH',
+    'ALL_PROXY',
+    'HTTPS_PROXY',
+    'HTTP_PROXY',
+    'ANTIGRAVITY_CONFIG',
+    'NO_PROXY',
+    'FTP_PROXY',
+];
+/** 检查主包 Info.plist 是否仍带 Antigravity 相关 LSEnvironment（Makefile 会写入 DYLD / HTTP_PROXY 等；残留则访达启动仍会注入） */
+function readLSEnvironmentStatus(appPath) {
+    const plist = path.join(appPath, 'Contents', 'Info.plist');
+    const title = 'Info.plist · LSEnvironment';
+    if (!fs.existsSync(plist)) {
+        return {
+            key: 'lsenvironment',
+            title,
+            ok: true,
+            detail: '未找到 Info.plist，跳过检查',
+        };
+    }
+    const r = cp.spawnSync('/usr/libexec/PlistBuddy', ['-c', 'Print :LSEnvironment', plist], {
+        encoding: 'utf-8',
+    });
+    const err = (r.stderr || '').trim();
+    if (r.status !== 0 || err.includes('Does Not Exist')) {
+        return {
+            key: 'lsenvironment',
+            title,
+            ok: true,
+            detail: '未设置 LSEnvironment（从访达启动时不应再带本扩展的 DYLD/代理变量）',
+            hint: '若应用仍走 SOCKS/HTTP 上游，请确认是否从终端带 HTTP_PROXY 启动、或存在另一份 Antigravity.app 副本',
+        };
+    }
+    const body = (r.stdout || '').trim();
+    if (/^Dict\s*\{\s*\}\s*$/s.test(body)) {
+        return {
+            key: 'lsenvironment',
+            title,
+            ok: true,
+            detail: 'LSEnvironment 为空字典',
+        };
+    }
+    // 只有当 dict 中包含 Antigravity 注入相关键时才报错；
+    // MallocNanoZone 等系统/第三方键不影响代理行为，不应触发警告。
+    const hasAntigravityKey = ANTIGRAVITY_LSENVIRONMENT_KEYS.some(k => new RegExp(`\\b${k}\\s*=`).test(body));
+    if (!hasAntigravityKey) {
+        return {
+            key: 'lsenvironment',
+            title,
+            ok: true,
+            detail: `LSEnvironment 存在但不含代理注入键（当前内容：${body.length > 200 ? `${body.slice(0, 200)}…` : body}）`,
+            hint: '访达启动时不会带本扩展的 DYLD/代理变量',
+        };
+    }
+    return {
+        key: 'lsenvironment',
+        title,
+        ok: false,
+        detail: body.length > 520 ? `${body.slice(0, 520)}…` : body,
+        hint: '请执行「恢复原生启动」或命令 antigravity-proxy.restoreStock；升级扩展后请重装免密 helper 再执行 strip',
+    };
+}
 function bundledBin(extensionRoot, name) {
     const p = path.join(extensionRoot, 'bin', name);
     return { ok: fs.existsSync(p), path: p };
+}
+/**
+ * 检测 macOS 系统代理设置（scutil --proxy）。
+ * 若系统代理已启用且指向本地地址，用户在停用 Clash/V2Ray 后会导致全机断网，
+ * 这与本扩展的 hosts/relay 无关，但是常见的用户困惑点。
+ */
+async function checkSystemProxy() {
+    const title = '系统网络代理（macOS 全局）';
+    try {
+        const out = await execShort('scutil --proxy', 5000);
+        const enabled = [];
+        const LOCAL_RE = /^(127\.|localhost|0\.0\.0\.0)/i;
+        const httpEnabled = /HTTPEnable\s*:\s*1/.test(out);
+        const httpsEnabled = /HTTPSEnable\s*:\s*1/.test(out);
+        const socksEnabled = /SOCKSEnable\s*:\s*1/.test(out);
+        const httpProxy = (out.match(/HTTPProxy\s*:\s*(\S+)/) || [])[1] ?? '';
+        const httpsProxy = (out.match(/HTTPSProxy\s*:\s*(\S+)/) || [])[1] ?? '';
+        const socksProxy = (out.match(/SOCKSProxy\s*:\s*(\S+)/) || [])[1] ?? '';
+        if (httpEnabled) {
+            enabled.push(`HTTP → ${httpProxy}`);
+        }
+        if (httpsEnabled) {
+            enabled.push(`HTTPS → ${httpsProxy}`);
+        }
+        if (socksEnabled) {
+            enabled.push(`SOCKS → ${socksProxy}`);
+        }
+        if (enabled.length === 0) {
+            return {
+                key: 'system_proxy',
+                title,
+                ok: true,
+                detail: '系统代理未启用，全机流量走直连（不受本扩展 hosts/relay 影响）',
+            };
+        }
+        const isLocal = ((httpEnabled && LOCAL_RE.test(httpProxy)) ||
+            (httpsEnabled && LOCAL_RE.test(httpsProxy)) ||
+            (socksEnabled && LOCAL_RE.test(socksProxy)));
+        return {
+            key: 'system_proxy',
+            title,
+            ok: !isLocal,
+            detail: `系统代理已启用：${enabled.join('，')}`,
+            hint: isLocal
+                ? '代理指向本机地址。若 Clash / V2Ray 未运行，全机网络将无法连接。' +
+                    '不使用代理时请在「系统设置 → 网络 → 代理」关闭，或停止本扩展后由 Clash / V2Ray 管理该设置。'
+                : '系统代理指向外部地址，一般无需本扩展干预。',
+        };
+    }
+    catch (e) {
+        return {
+            key: 'system_proxy',
+            title,
+            ok: true,
+            detail: `无法读取系统代理设置（scutil 不可用）: ${e?.message ?? e}`,
+        };
+    }
 }
 /**
  * 收集环境诊断（不修改系统）
@@ -167,6 +301,11 @@ async function collectDiagnostics(extensionRoot, config) {
         detail: ag.message,
         hint: ag.valid ? undefined : '安装 Antigravity 或在配置中指定 .app 路径',
     });
+    const agBundle = resolveAntigravityBundleForDiagnostics(config);
+    const electron = path.join(agBundle, 'Contents', 'MacOS', 'Electron');
+    if (agBundle && fs.existsSync(electron)) {
+        items.push(readLSEnvironmentStatus(agBundle));
+    }
     const dylib = bundledBin(extensionRoot, 'libantigravity.dylib');
     const relay = bundledBin(extensionRoot, runtimeConstants_1.RELAY_EXECUTABLE);
     items.push({
@@ -183,17 +322,23 @@ async function collectDiagnostics(extensionRoot, config) {
         detail: relay.ok ? relay.path : `缺失: ${relay.path}`,
         hint: relay.ok ? undefined : '同上',
     });
-    const sudoHint = (0, sudoHelper_1.isSudoHelperInstalled)()
+    const helperFullyInstalled = (0, sudoHelper_1.isSudoHelperInstalled)();
+    const helperBinOnly = (0, sudoHelper_1.isHelperBinaryOnlyInstalled)();
+    const sudoHint = helperFullyInstalled
         ? `已安装免密 sudo helper：${sudoHelper_1.SUDO_HELPER_PATH}（准备/启动不应再反复要密码）`
-        : `未安装免密安装：命令面板「一次性安装免密 sudo」，仅需密码一次，之后走 ${sudoHelper_1.SUDO_HELPER_PATH}`;
+        : helperBinOnly
+            ? `⚠️ helper 脚本存在（${sudoHelper_1.SUDO_HELPER_PATH}）但缺少 /etc/sudoers.d/antigravity-proxy 免密规则 — sudo 仍会要密码，停用/清理会静默失败。请重新执行「一次性安装免密 sudo」`
+            : `未安装免密 sudo helper：命令面板「一次性安装免密 sudo」，仅需密码一次，之后走 ${sudoHelper_1.SUDO_HELPER_PATH}`;
     items.push({
         key: 'sudo_helper',
         title: '免密 sudo（可选）',
-        ok: (0, sudoHelper_1.isSudoHelperInstalled)(),
+        ok: helperFullyInstalled,
         detail: sudoHint,
-        hint: (0, sudoHelper_1.isSudoHelperInstalled)()
+        hint: helperFullyInstalled
             ? undefined
-            : '诊断页顶部或本条下方的「立即安装」；或在命令面板搜索「一次性安装免密 sudo」',
+            : helperBinOnly
+                ? '请重新执行「一次性安装免密 sudo」以写入 sudoers 免密规则'
+                : '诊断页顶部或本条下方的「立即安装」；或在命令面板搜索「一次性安装免密 sudo」',
     });
     const prepareWhere = '免密 sudo 只省略密码，不会自动写 hosts。请点「准备特权环境」或开启设置「自动准备 hosts/中继」（需已装免密 helper）。亦可①配置页②诊断页顶部③命令面板。';
     const hosts = readHostsStatus();
@@ -223,7 +368,44 @@ async function collectDiagnostics(extensionRoot, config) {
         detail: 'hosts、监听 443、codesign 需要管理员密码。「准备特权环境」只写 hosts + 启动 relay；完整一键启动另需注入 Antigravity。',
         hint: prepareWhere + '。relay 起停不会自动出现在配置页，需自行检测或看日志。',
     });
+    items.push(await checkSystemProxy());
     return items;
+}
+/**
+ * 仅供「完全停用」后调用：若系统代理指向本地地址则返回警告文案，否则返回 undefined。
+ */
+async function checkSystemProxyForWarning() {
+    try {
+        const out = await execShort('scutil --proxy', 5000);
+        const LOCAL_RE = /^(127\.|localhost|0\.0\.0\.0)/i;
+        const httpEnabled = /HTTPEnable\s*:\s*1/.test(out);
+        const httpsEnabled = /HTTPSEnable\s*:\s*1/.test(out);
+        const socksEnabled = /SOCKSEnable\s*:\s*1/.test(out);
+        const httpProxy = (out.match(/HTTPProxy\s*:\s*(\S+)/) || [])[1] ?? '';
+        const httpsProxy = (out.match(/HTTPSProxy\s*:\s*(\S+)/) || [])[1] ?? '';
+        const socksProxy = (out.match(/SOCKSProxy\s*:\s*(\S+)/) || [])[1] ?? '';
+        const isLocal = ((httpEnabled && LOCAL_RE.test(httpProxy)) ||
+            (httpsEnabled && LOCAL_RE.test(httpsProxy)) ||
+            (socksEnabled && LOCAL_RE.test(socksProxy)));
+        if (isLocal) {
+            const parts = [];
+            if (httpEnabled) {
+                parts.push(`HTTP → ${httpProxy}`);
+            }
+            if (httpsEnabled) {
+                parts.push(`HTTPS → ${httpsProxy}`);
+            }
+            if (socksEnabled) {
+                parts.push(`SOCKS → ${socksProxy}`);
+            }
+            return `⚠️ 系统代理仍指向本地：${parts.join('，')}。Clash / V2Ray 停止后全机网络将断开。\n` +
+                `请前往「系统设置 → 网络 → [当前网络] → 详细信息 → 代理」关闭，或由 Clash / V2Ray 管理该项。`;
+        }
+        return undefined;
+    }
+    catch {
+        return undefined;
+    }
 }
 /** hosts 或 SNI 中继未就绪时需要执行「准备特权环境」 */
 async function needsPrepareEnvironmentSetup() {

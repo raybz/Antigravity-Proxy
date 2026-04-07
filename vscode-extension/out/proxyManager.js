@@ -33,6 +33,12 @@ var __importStar = (this && this.__importStar) || (function () {
     };
 })();
 Object.defineProperty(exports, "__esModule", { value: true });
+exports.GLOBAL_STATE_PROXY_DISABLED = void 0;
+exports.initGlobalState = initGlobalState;
+exports.isProxyManuallyDisabled = isProxyManuallyDisabled;
+exports.setProxyManuallyDisabled = setProxyManuallyDisabled;
+exports.onRestoreStockDone = onRestoreStockDone;
+exports.resolveAntigravityBundlePath = resolveAntigravityBundlePath;
 exports.initProxyManager = initProxyManager;
 exports.stopStatusPoller = stopStatusPoller;
 exports.startStatusPoller = startStatusPoller;
@@ -42,7 +48,7 @@ exports.cleanupPrivilegedEnvironment = cleanupPrivilegedEnvironment;
 exports.preparePrivilegedEnvironment = preparePrivilegedEnvironment;
 exports.stop = stop;
 exports.resign = resign;
-exports.getProxyRunning = getProxyRunning;
+exports.restoreStockBehavior = restoreStockBehavior;
 exports.recoverStatus = recoverStatus;
 const vscode = __importStar(require("vscode"));
 const cp = __importStar(require("child_process"));
@@ -63,6 +69,221 @@ let startBusy = false;
 let statusPollInFlight = false;
 /** 一键启动后若在暖机期内未通过全量检测，保持黄色而非立刻红色 */
 let warmUpUntilMs = 0;
+/** ExtensionContext.globalState 存储键：用户主动执行「完全停用代理」后置 true，阻止 auto-prepare 跨工作区重建 hosts/relay */
+exports.GLOBAL_STATE_PROXY_DISABLED = 'proxyManuallyDisabled';
+let _globalState;
+function initGlobalState(state) {
+    _globalState = state;
+}
+function isProxyManuallyDisabled() {
+    return _globalState?.get(exports.GLOBAL_STATE_PROXY_DISABLED, false) ?? false;
+}
+async function setProxyManuallyDisabled(disabled) {
+    if (_globalState) {
+        await _globalState.update(exports.GLOBAL_STATE_PROXY_DISABLED, disabled);
+        (0, logger_1.log)(`proxyManuallyDisabled 全局状态已设为: ${disabled}`);
+    }
+}
+const restoreStockListeners = [];
+/** 注册一个在 restoreStockBehavior 完成时触发的回调（用于 webview 自动刷新诊断） */
+function onRestoreStockDone(listener) {
+    restoreStockListeners.push(listener);
+    return {
+        dispose() {
+            const idx = restoreStockListeners.indexOf(listener);
+            if (idx >= 0) {
+                restoreStockListeners.splice(idx, 1);
+            }
+        },
+    };
+}
+const ANTIGRAVITY_ENTITLEMENTS_PATH = '/tmp/antigravity_entitlements.plist';
+function writeAntigravityEntitlementsFile() {
+    const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>com.apple.security.automation.apple-events</key><true/>
+  <key>com.apple.security.cs.allow-jit</key><true/>
+  <key>com.apple.security.device.audio-input</key><true/>
+  <key>com.apple.security.device.camera</key><true/>
+  <key>com.apple.security.cs.allow-dyld-environment-variables</key><true/>
+  <key>com.apple.security.cs.disable-library-validation</key><true/>
+</dict></plist>`;
+    fs.writeFileSync(ANTIGRAVITY_ENTITLEMENTS_PATH, xml);
+}
+/** 需重签名的可执行文件（含任意架构 language_server_macos_*） */
+function bundleExecutableSignPaths(appPath) {
+    const paths = [
+        path.join(appPath, 'Contents/MacOS/Electron'),
+        path.join(appPath, 'Contents/Frameworks/Antigravity Helper.app/Contents/MacOS/Antigravity Helper'),
+        path.join(appPath, 'Contents/Frameworks/Antigravity Helper (GPU).app/Contents/MacOS/Antigravity Helper (GPU)'),
+        path.join(appPath, 'Contents/Frameworks/Antigravity Helper (Renderer).app/Contents/MacOS/Antigravity Helper (Renderer)'),
+        path.join(appPath, 'Contents/Frameworks/Antigravity Helper (Plugin).app/Contents/MacOS/Antigravity Helper (Plugin)'),
+    ];
+    const binDir = path.join(appPath, 'Contents/Resources/app/extensions/antigravity/bin');
+    try {
+        if (fs.existsSync(binDir)) {
+            for (const name of fs.readdirSync(binDir)) {
+                if (name.startsWith('language_server_macos_')) {
+                    paths.push(path.join(binDir, name));
+                }
+            }
+        }
+    }
+    catch {
+        /* ignore */
+    }
+    return paths;
+}
+function delay(ms) {
+    return new Promise(r => setTimeout(r, ms));
+}
+/** 完全停用后的统一说明（写入输出通道，供用户对照多副本/终端代理/系统等） */
+function logRestoreNoProxyFollowUp(context) {
+    const lines = [
+        '━━━━ 完全停用代理 · 后续建议 ━━━━',
+        '• 启动：优先从访达打开 Antigravity；若在终端启动，先执行 env | grep -i proxy，避免继承 HTTP_PROXY / HTTPS_PROXY / ALL_PROXY。',
+        '• 路径：配置中的 .app 须与日常打开的为同一份；机器上有多份副本时，未执行 strip 的那份仍可能带 LSEnvironment。',
+        '• Makefile：曾用仓库 make 写入注入的，必须对当时修改的同一 bundle 再执行本流程。',
+        '• 系统代理：系统设置 → 网络 → 当前网络 → 详细信息 → 代理；若自行开启过，需要直连时可关闭。',
+        '• DNS：若解析仍异常，可执行：sudo dscacheutil -flushcache && sudo killall -HUP mDNSResponder',
+        '• 仍异常：在配置页执行「检测 hosts / 中继」查看 LSEnvironment；免密 helper 过旧请先「一次性安装免密 sudo」更新 /usr/local/bin。',
+        '• 说明：编辑器里可保留本扩展与代理设置项；未再次「启动代理」则不会劫持流量。',
+        '━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━',
+    ];
+    if (context === 'terminal_pending') {
+        lines.splice(1, 0, '（当前：请先在系统「终端」窗口内跑完 sudo 脚本，再执行下列建议。）');
+    }
+    else if (context === 'no_app_path') {
+        lines.splice(1, 0, '（当前：未能解析到 .app 路径，仅完成 hosts/中继清理；请在配置中填写 Antigravity 路径后再次点「完全停用代理」，才能移除 Info.plist 注入。）');
+    }
+    (0, logger_1.log)(lines.join('\n'));
+}
+function showRestoreNoProxyToast(message) {
+    void vscode.window
+        .showInformationMessage(message, '查看日志')
+        .then(choice => {
+        if (choice === '查看日志') {
+            (0, logger_1.showLog)();
+        }
+    });
+}
+/**
+ * 通过 macOS「输入密码以运行此任务…」对话框提权；使用绝对路径 osascript，避免 Cursor 环境下 PATH 找不到命令。
+ */
+function runWithAdminPrivileges(bashScriptPath, timeoutMs = 180000) {
+    return new Promise((resolve, reject) => {
+        const run = `/bin/bash ${bashScriptPath}`;
+        const appleScript = `do shell script ${JSON.stringify(run)} with administrator privileges`;
+        (0, logger_1.log)('将通过系统密码框提权执行恢复/签名脚本（非集成终端）');
+        const env = { ...process.env, PATH: '/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:/usr/local/bin' };
+        cp.execFile('/usr/bin/osascript', ['-e', appleScript], { timeout: timeoutMs, env }, (err, stdout, stderr) => {
+            const out = (stdout || '').trim();
+            const errTxt = (stderr || '').trim();
+            if (err) {
+                const combined = [errTxt, out].filter(Boolean).join('\n').trim();
+                (0, logger_1.logError)(`osascript 提权失败: ${combined || err.message || String(err)}`);
+                reject(new Error(combined || err.message || String(err)));
+            }
+            else {
+                resolve(out);
+            }
+        });
+    });
+}
+/**
+ * 生成 .command：由「终端.app」执行，在集成宿主外的真实 TTY 里 sudo（osascript 被拦或密码框不弹时的兜底）。
+ */
+function writeTerminalSudoLauncher(scriptPath, title) {
+    const launcher = `/tmp/antigravity-proxy-launcher-${Date.now()}.command`;
+    const body = `#!/bin/bash
+clear
+printf '%s\\n' ${JSON.stringify(title)}
+echo "路径: ${scriptPath}"
+echo "——————————————————————————————"
+sudo /bin/bash ${JSON.stringify(scriptPath)}
+EC=$?
+echo "——————————————————————————————"
+if [ "$EC" -eq 0 ]; then echo "✓ 脚本已执行完毕"; else echo "✗ 退出码: $EC（请把上方输出复制到反馈）"; fi
+read -p "按回车关闭…"
+exit "$EC"
+`;
+    fs.writeFileSync(launcher, body, { mode: 0o755 });
+    (0, logger_1.log)(`已写入终端启动器: ${launcher}`);
+    return launcher;
+}
+/** 用访达/系统默认方式打开 .command → 始终进「终端」 */
+async function openLauncherInTerminalApp(launcherPath) {
+    await runShell(`open ${JSON.stringify(launcherPath)}`, '/tmp', false, 30000);
+}
+function appendRootCodesignBlock(body, appPath) {
+    let b = body;
+    b += `ENT=${JSON.stringify(ANTIGRAVITY_ENTITLEMENTS_PATH)}\n`;
+    for (const p of bundleExecutableSignPaths(appPath)) {
+        b += `if [ -f ${JSON.stringify(p)} ]; then echo "codesign: ${p}"; codesign -f -s - --entitlements "$ENT" ${JSON.stringify(p)}; fi\n`;
+    }
+    return b;
+}
+function writeRootStripStockScript(appPath) {
+    writeAntigravityEntitlementsFile();
+    const scriptPath = `/tmp/antigravity-restore-stock-${Date.now()}.sh`;
+    const plist = path.join(appPath, 'Contents', 'Info.plist');
+    let body = '#!/bin/bash\nset -e\n';
+    body += `echo "[Antigravity Proxy] 移除 Antigravity 注入键并重签名（root）"\n`;
+    body += `PLIST=${JSON.stringify(plist)}\n`;
+    for (const key of LSENVIRONMENT_STRIP_KEYS) {
+        body += `/usr/libexec/PlistBuddy -c "Delete :LSEnvironment:${key}" "$PLIST" 2>/dev/null || true\n`;
+    }
+    // 删完注入键后检查 dict 是否已变空：空则删整个 dict，非空则保留（避免误删 MallocNanoZone 等系统/第三方键）
+    body += `_remaining=$(/usr/libexec/PlistBuddy -c "Print :LSEnvironment" "$PLIST" 2>/dev/null || true)\n`;
+    body += `if [ -z "$_remaining" ] || echo "$_remaining" | grep -qE '^Dict\\s*\\{\\s*\\}\\s*$'; then\n`;
+    body += `  /usr/libexec/PlistBuddy -c "Delete :LSEnvironment" "$PLIST" 2>/dev/null || true\n`;
+    body += `  echo "[Antigravity Proxy] LSEnvironment dict 已清空并移除"\n`;
+    body += `else\n`;
+    body += `  echo "[Antigravity Proxy] LSEnvironment 仍含非代理键，保留 dict：$_remaining"\n`;
+    body += `fi\n`;
+    body = appendRootCodesignBlock(body, appPath);
+    body += `echo "[Antigravity Proxy] 恢复原生签名完成"\n`;
+    fs.writeFileSync(scriptPath, body, { mode: 0o755 });
+    return scriptPath;
+}
+function writeRootResignScript(appPath, configYamlPath) {
+    writeAntigravityEntitlementsFile();
+    const scriptPath = `/tmp/antigravity-resign-${Date.now()}.sh`;
+    const plist = path.join(appPath, 'Contents', 'Info.plist');
+    let body = '#!/bin/bash\nset -e\n';
+    body += `echo "[Antigravity Proxy] 写入 LSEnvironment 并重签名（root）"\n`;
+    body += `PLIST=${JSON.stringify(plist)}\n`;
+    body += `/usr/libexec/PlistBuddy -c "Delete :LSEnvironment" "$PLIST" 2>/dev/null || true\n`;
+    body += `/usr/libexec/PlistBuddy -c ${JSON.stringify('Add :LSEnvironment dict')} "$PLIST"\n`;
+    const addCfg = `Add :LSEnvironment:ANTIGRAVITY_CONFIG string ${configYamlPath}`;
+    body += `/usr/libexec/PlistBuddy -c ${JSON.stringify(addCfg)} "$PLIST"\n`;
+    body = appendRootCodesignBlock(body, appPath);
+    body += `echo "[Antigravity Proxy] 重签名完成"\n`;
+    fs.writeFileSync(scriptPath, body, { mode: 0o755 });
+    return scriptPath;
+}
+/** 解析主应用 .app 路径（配置优先，否则自动探测） */
+function resolveAntigravityBundlePath() {
+    const cfg = (0, configManager_1.getConfig)();
+    const manual = (cfg.antigravityAppPath && cfg.antigravityAppPath.trim()) || '';
+    return manual || (0, validator_1.detectAntigravityPath)() || '';
+}
+/**
+ * Makefile / 旧版注入可能写入的 LSEnvironment 键。
+ * strip 时逐项删除这些键；若删完后 dict 为空则一并删除整个 dict，
+ * 否则保留 dict（以免删掉 MallocNanoZone 等与代理无关的系统/第三方键）。
+ */
+const LSENVIRONMENT_STRIP_KEYS = [
+    'DYLD_INSERT_LIBRARIES',
+    'DYLD_LIBRARY_PATH',
+    'ALL_PROXY',
+    'HTTPS_PROXY',
+    'HTTP_PROXY',
+    'ANTIGRAVITY_CONFIG',
+    'NO_PROXY',
+    'FTP_PROXY',
+];
 function initProxyManager(extensionPath) {
     extensionPathOverride = extensionPath;
 }
@@ -70,7 +291,7 @@ function getExtensionRoot() {
     if (extensionPathOverride) {
         return extensionPathOverride;
     }
-    const extension = vscode.extensions.getExtension('ray2666.antigravity-proxy');
+    const extension = vscode.extensions.getExtension('raybz.antigravity-proxy');
     if (extension) {
         return extension.extensionPath;
     }
@@ -116,18 +337,19 @@ function createPrivilegeTerminal(name) {
         hideFromUser: background,
     });
 }
+/** `show(true)` 在 API 里表示 preserveFocus=真 → 终端不抢焦点，会导致无法输入 sudo。必须为 false 才会聚焦终端。 */
 function showPrivilegeTerminalIfNeeded(terminal) {
     if (!(0, sudoHelper_1.isSudoHelperInstalled)()) {
-        terminal.show(true);
+        terminal.show(false);
     }
 }
 /** @param silent 为 true 时不写入输出通道（用于定时状态探测，避免刷屏） */
-function runShell(cmd, cwd = '/tmp', silent = false) {
+function runShell(cmd, cwd = '/tmp', silent = false, timeoutMs = 60000) {
     return new Promise((resolve, reject) => {
         if (!silent) {
             (0, logger_1.log)(`执行命令: ${cmd}`);
         }
-        cp.exec(cmd, { cwd, timeout: 60000 }, (err, stdout, stderr) => {
+        cp.exec(cmd, { cwd, timeout: timeoutMs }, (err, stdout, stderr) => {
             if (err) {
                 reject(new Error(stderr || err.message));
             }
@@ -240,6 +462,8 @@ async function start() {
         vscode.window.showInformationMessage('启动已在进行中，请稍候。');
         return;
     }
+    // 用户主动启动代理，清除「手动禁用」全局标志
+    await setProxyManuallyDisabled(false);
     startBusy = true;
     (0, statusIndicator_1.setRuntimeIndicator)('starting');
     /* 不自动 showLog：状态栏点按时与 Output/终端抢焦点易触发部分宿主不稳；需要时用户可命令面板「查看日志」 */
@@ -322,7 +546,7 @@ HTTPS_PROXY="${config.type}://${config.host}:${config.port}" \\
 HTTP_PROXY="${config.type}://${config.host}:${config.port}" \\
 exec "${appPath}/Contents/MacOS/Electron"
 `;
-        const scriptPath = '/tmp/antigravity-start.sh';
+        const scriptPath = `/tmp/antigravity-start-${Date.now()}.sh`;
         fs.writeFileSync(scriptPath, fullScript, { mode: 0o755 });
         terminal.sendText(`bash ${scriptPath}`);
         isProxyRunning = false;
@@ -346,30 +570,95 @@ exec "${appPath}/Contents/MacOS/Electron"
  */
 async function cleanupPrivilegedEnvironment() {
     (0, logger_1.log)('🧹 清理 hosts / 中继...');
-    try {
-        if ((0, sudoHelper_1.isSudoHelperInstalled)()) {
-            await runShell(`sudo ${sudoHelper_1.SUDO_HELPER_PATH} cleanup-all`).catch(() => { });
+    let cleanupError;
+    if ((0, sudoHelper_1.isSudoHelperInstalled)()) {
+        try {
+            const out = await runShell(`/usr/bin/sudo ${sudoHelper_1.SUDO_HELPER_PATH} cleanup-all`);
+            if (out?.trim()) {
+                (0, logger_1.log)(`cleanup-all 输出: ${out.trim()}`);
+            }
         }
-        else {
-            try {
-                if (fs.existsSync(runtimeConstants_1.RELAY_PID_PATH)) {
-                    const pid = fs.readFileSync(runtimeConstants_1.RELAY_PID_PATH, 'utf-8').trim();
-                    await runShell(`sudo kill ${pid}`).catch(() => { });
-                    fs.unlinkSync(runtimeConstants_1.RELAY_PID_PATH);
+        catch (err) {
+            cleanupError = err instanceof Error ? err : new Error(String(err));
+            (0, logger_1.logError)(`helper cleanup-all 失败: ${cleanupError.message}`);
+        }
+    }
+    else {
+        try {
+            if (fs.existsSync(runtimeConstants_1.RELAY_PID_PATH)) {
+                const pid = fs.readFileSync(runtimeConstants_1.RELAY_PID_PATH, 'utf-8').trim();
+                if (/^\d+$/.test(pid)) {
+                    await runShell(`/usr/bin/sudo kill ${pid}`).catch(() => { });
+                }
+                fs.unlinkSync(runtimeConstants_1.RELAY_PID_PATH);
+            }
+        }
+        catch {
+            /* relay pid 读取失败，忽略 */
+        }
+        try {
+            await runShell("/usr/bin/sudo /usr/bin/sed -i '' '/# antigravity-proxy$/d' /etc/hosts");
+        }
+        catch (err) {
+            cleanupError = err instanceof Error ? err : new Error(String(err));
+            (0, logger_1.logError)(`清理 hosts 失败: ${cleanupError.message}`);
+        }
+        await runShell('/usr/bin/sudo dscacheutil -flushcache; /usr/bin/sudo killall -HUP mDNSResponder').catch(() => { });
+    }
+    // ── 验证 + 回退：helper 脚本用了 || true，exit 0 不代表真正清理成功 ──
+    if (!cleanupError) {
+        // 验证中继是否已停止
+        if (fs.existsSync(runtimeConstants_1.RELAY_PID_PATH)) {
+            const pid = fs.readFileSync(runtimeConstants_1.RELAY_PID_PATH, 'utf-8').trim();
+            if (/^\d+$/.test(pid)) {
+                const still = await runShell(`ps -p ${pid} -o pid=`, '/tmp', true).catch(() => '');
+                if (still.trim()) {
+                    (0, logger_1.log)(`⚠️ cleanup-all 后中继 PID ${pid} 仍存活，回退 kill -9`);
+                    await runShell(`/usr/bin/sudo kill -9 ${pid}`).catch(() => { });
+                    await delay(500);
                 }
             }
-            catch {
-                /* ignore */
+            try {
+                fs.unlinkSync(runtimeConstants_1.RELAY_PID_PATH);
             }
-            await runShell("sudo sed -i '' '/# antigravity-proxy$/d' /etc/hosts").catch(() => { });
-            await runShell('sudo dscacheutil -flushcache; sudo killall -HUP mDNSResponder').catch(() => { });
+            catch { }
         }
-        (0, logger_1.logSuccess)('特权环境已清理（hosts + relay）');
+        // 验证 /etc/hosts 是否仍含标记行
+        try {
+            const hosts = fs.readFileSync('/etc/hosts', 'utf-8');
+            if (hosts.includes(relayDomains_1.HOSTS_MARKER)) {
+                (0, logger_1.log)('⚠️ cleanup-all 后 /etc/hosts 仍含标记行，回退直接 sed');
+                await runShell(`/usr/bin/sudo /usr/bin/sed -i '' '/${relayDomains_1.HOSTS_MARKER.replace(/[/\\]/g, '\\$&')}/d' /etc/hosts`).catch(e => {
+                    (0, logger_1.logError)(`回退 sed 清理 hosts 失败: ${e instanceof Error ? e.message : e}`);
+                });
+                await runShell('/usr/bin/sudo dscacheutil -flushcache; /usr/bin/sudo killall -HUP mDNSResponder').catch(() => { });
+            }
+        }
+        catch { }
+        // 最终验证
+        try {
+            const hostsAfter = fs.readFileSync('/etc/hosts', 'utf-8');
+            if (hostsAfter.includes(relayDomains_1.HOSTS_MARKER)) {
+                cleanupError = new Error('/etc/hosts 仍含 antigravity-proxy 行，可能缺少 sudo 权限');
+            }
+        }
+        catch { }
     }
-    catch (err) {
-        (0, logger_1.logError)(`清理失败: ${err.message}`);
-        throw err;
+    if (cleanupError) {
+        const helperInstalled = (0, sudoHelper_1.isSudoHelperInstalled)();
+        const hint = helperInstalled
+            ? `免密 helper 已装但执行失败，请重新点「安装免密 sudo」更新 /usr/local/bin/ 后重试。` +
+                `或在终端手动执行：sudo sed -i '' '/# antigravity-proxy$/d' /etc/hosts`
+            : `请先点「安装免密 sudo」（仅需输入一次密码），再重试。` +
+                `或在终端手动执行：sudo sed -i '' '/# antigravity-proxy$/d' /etc/hosts`;
+        void vscode.window.showErrorMessage(`⚠️ hosts / 中继清理失败：${cleanupError.message}。${hint}`, '安装 / 重装 helper').then(choice => {
+            if (choice === '安装 / 重装 helper') {
+                void vscode.commands.executeCommand('antigravity-proxy.installSudoHelper');
+            }
+        });
+        throw cleanupError;
     }
+    (0, logger_1.logSuccess)('特权环境已清理（hosts + relay）');
 }
 /**
  * 手动执行「第 4 步」：写入 hosts、刷新 DNS、启动 SNI 中继（不启动 Antigravity）
@@ -428,7 +717,7 @@ sleep 1
 echo "完成。日志: ${runtimeConstants_1.RELAY_LOG_PATH}"
 `;
             })();
-        const scriptPath = '/tmp/antigravity-prepare.sh';
+        const scriptPath = `/tmp/antigravity-prepare-${Date.now()}.sh`;
         fs.writeFileSync(scriptPath, script, { mode: 0o755 });
         const terminal = createPrivilegeTerminal('Antigravity Prepare');
         showPrivilegeTerminalIfNeeded(terminal);
@@ -453,7 +742,7 @@ async function stop() {
     (0, logger_1.log)('⏹ 正在停止代理...');
     try {
         warmUpUntilMs = 0;
-        await runShell('pkill -f "Antigravity.app"').catch(() => { });
+        await runShell('pkill -f "Antigravity.app/Contents/MacOS/Electron"').catch(() => { });
         await cleanupPrivilegedEnvironment();
         isProxyRunning = false;
         stopStatusPoller();
@@ -464,53 +753,176 @@ async function stop() {
         (0, logger_1.logError)(`停止失败: ${err.message}`);
     }
 }
+function formatAdminPrivilegeError(err) {
+    const raw = err instanceof Error ? err.message : String(err);
+    if (/User canceled|user canceled|用户取消|取消了|-128|\(-128\)/i.test(raw)) {
+        return '已取消系统密码框，未完成操作。';
+    }
+    if (/not authorized|Not authorized|不允许|automation|Operation not permitted|EPERM/i.test(raw)) {
+        return '系统未允许当前应用弹出提权对话框。请改用已打开的「终端」窗口完成，或在 系统设置 → 隐私与安全性 中检查 Cursor 相关权限。';
+    }
+    return raw || '提权执行失败';
+}
 /**
  * 强制重签名
  */
 async function resign() {
     const config = (0, configManager_1.getConfig)();
-    const appPath = config.antigravityAppPath;
+    const appPath = resolveAntigravityBundlePath();
     if (!appPath) {
-        vscode.window.showErrorMessage('未找到 Antigravity.app，请先配置');
+        vscode.window.showErrorMessage('未找到 Antigravity.app，请先配置或安装到 /Applications');
         return;
     }
-    (0, logger_1.log)('🔑 正在执行重签名...');
-    const entitlementsPath = '/tmp/antigravity_entitlements.plist';
-    const entitlementsContent = `<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0"><dict>
-  <key>com.apple.security.automation.apple-events</key><true/>
-  <key>com.apple.security.cs.allow-jit</key><true/>
-  <key>com.apple.security.device.audio-input</key><true/>
-  <key>com.apple.security.device.camera</key><true/>
-  <key>com.apple.security.cs.allow-dyld-environment-variables</key><true/>
-  <key>com.apple.security.cs.disable-library-validation</key><true/>
-</dict></plist>`;
-    fs.writeFileSync(entitlementsPath, entitlementsContent);
-    const terminal = vscode.window.createTerminal({ name: 'Antigravity Resign' });
-    terminal.show(true);
-    const targets = [
-        `"${appPath}/Contents/MacOS/Electron"`,
-        `"${appPath}/Contents/Frameworks/Antigravity Helper.app/Contents/MacOS/Antigravity Helper"`,
-        `"${appPath}/Contents/Frameworks/Antigravity Helper (GPU).app/Contents/MacOS/Antigravity Helper (GPU)"`,
-        `"${appPath}/Contents/Frameworks/Antigravity Helper (Renderer).app/Contents/MacOS/Antigravity Helper (Renderer)"`,
-        `"${appPath}/Contents/Frameworks/Antigravity Helper (Plugin).app/Contents/MacOS/Antigravity Helper (Plugin)"`,
-        `"${appPath}/Contents/Resources/app/extensions/antigravity/bin/language_server_macos_arm"`
-    ];
+    (0, logger_1.log)('🔑 正在执行重签名（系统密码框提权）…');
     const configYamlPath = (0, configManager_1.syncConfigYaml)(config);
-    let signCmd = `echo "正在写入 LSEnvironment 并重签名..."\n`;
-    signCmd += `PLIST="${appPath}/Contents/Info.plist"\n`;
-    signCmd += `sudo /usr/libexec/PlistBuddy -c "Delete :LSEnvironment" "$PLIST" 2>/dev/null || true\n`;
-    signCmd += `sudo /usr/libexec/PlistBuddy -c "Add :LSEnvironment dict" "$PLIST"\n`;
-    signCmd += `sudo /usr/libexec/PlistBuddy -c "Add :LSEnvironment:ANTIGRAVITY_CONFIG string ${configYamlPath}" "$PLIST"\n`;
-    for (const target of targets) {
-        signCmd += `if [ -f ${target} ]; then echo "签名: ${target}"; sudo codesign -f -s - --entitlements ${entitlementsPath} ${target}; fi\n`;
+    const scriptPath = writeRootResignScript(appPath, configYamlPath);
+    try {
+        const out = await runWithAdminPrivileges(scriptPath);
+        if (out) {
+            (0, logger_1.log)(out);
+        }
+        (0, logger_1.logSuccess)('重签名已完成');
+        vscode.window.showInformationMessage('重签名已完成（已使用 macOS 管理员密码框提权）');
     }
-    terminal.sendText(signCmd);
-    (0, logger_1.logSuccess)('重签名指令已发送');
+    catch (e) {
+        (0, logger_1.logError)(`重签名（系统对话框）: ${e instanceof Error ? e.message : String(e)}`);
+        try {
+            const launcher = writeTerminalSudoLauncher(scriptPath, 'Antigravity Proxy · 强制重签名（终端 sudo）');
+            await openLauncherInTerminalApp(launcher);
+            void vscode.window.showInformationMessage('系统提权对话框未成功。已在独立「终端」窗口打开脚本，请在该窗口输入管理员密码直至结束。');
+        }
+        catch (e2) {
+            const msg = formatAdminPrivilegeError(e);
+            const extra = e2 instanceof Error ? e2.message : String(e2);
+            (0, logger_1.logError)(`重签名兜底失败: ${extra}`);
+            void vscode.window.showErrorMessage(`重签名失败：${msg}`);
+        }
+    }
 }
-function getProxyRunning() {
-    return isProxyRunning;
+/**
+ * 关闭代理并尽量恢复默认：结束 Antigravity、清理 hosts/SNI 中继、移除 Info.plist 中的 LSEnvironment（含 DYLD / 代理变量）并重签名，之后可从访达正常启动、不再注入。
+ */
+async function restoreStockBehavior() {
+    (0, logger_1.log)('🔄 正在关闭代理并恢复默认启动方式…');
+    warmUpUntilMs = 0;
+    // ── 前置检查：helper 已装但版本过期时，先拦截并要求重装 ──
+    if ((0, sudoHelper_1.isSudoHelperInstalled)() && (0, sudoHelper_1.isHelperOutdated)(getExtensionRoot())) {
+        const choice = await vscode.window.showWarningMessage('⚠️ 免密 sudo helper 版本已过期（扩展已更新，/usr/local/bin/ 未同步）。' +
+            '继续执行将无法清理 hosts / 中继，请先重装 helper 后再点「完全停用代理」。', { modal: true }, '立即重装 helper');
+        if (choice === '立即重装 helper') {
+            void vscode.commands.executeCommand('antigravity-proxy.installSudoHelper');
+        }
+        return;
+    }
+    // 先写全局禁用标志（不依赖 settings 作用域），阻止 auto-prepare 在重启后跨工作区重建
+    await setProxyManuallyDisabled(true);
+    try {
+        await (0, configManager_1.disableAutoLaunchInAllConfigScopes)();
+    }
+    catch (e) {
+        (0, logger_1.logError)(`写入设置失败（自动启动/自动准备）: ${e?.message || e}`);
+    }
+    (0, logger_1.log)('已在所有配置作用域关闭「自动启动」与「自动准备 hosts/中继」（含工作区 settings）。');
+    try {
+        await runShell('pkill -f "Antigravity.app/Contents/MacOS/Electron"').catch(() => { });
+        // 等待进程实际退出（最多 8 秒，每秒检查一次），避免 codesign 时报 resource busy
+        let waited = 0;
+        while (waited < 8000) {
+            await delay(1000);
+            waited += 1000;
+            const still = await runShell('pgrep -f "Antigravity.app/Contents/MacOS/Electron"').catch(() => '');
+            if (!still || !still.trim()) {
+                break;
+            }
+        }
+        await cleanupPrivilegedEnvironment();
+    }
+    catch (err) {
+        (0, logger_1.logError)(`清理环境时出错: ${err.message}`);
+        // cleanupPrivilegedEnvironment 抛出说明 hosts 未清干净，停止后续流程
+        // 错误弹窗已在 cleanupPrivilegedEnvironment 内部弹出，此处不再重复
+        isProxyRunning = false;
+        stopStatusPoller();
+        (0, statusIndicator_1.setRuntimeIndicator)('bad');
+        return;
+    }
+    const appPath = resolveAntigravityBundlePath();
+    let stripOk = false;
+    let stripDeferredToTerminal = false;
+    if (appPath && (0, sudoHelper_1.isSudoHelperInstalled)()) {
+        try {
+            await runShell(`/usr/bin/sudo ${sudoHelper_1.SUDO_HELPER_PATH} strip-lsenvironment ${JSON.stringify(appPath)}`, '/tmp', false, 120000);
+            stripOk = true;
+            (0, logger_1.logSuccess)('已通过免密 helper 移除 LSEnvironment 并完成重签名');
+        }
+        catch (e) {
+            (0, logger_1.logError)(`免密 strip-lsenvironment 失败（将改用系统密码框）：${e.message}。若脚本过旧，请重新「安装免密 sudo」更新 /usr/local/bin。`);
+        }
+    }
+    if (appPath && !stripOk) {
+        const scriptPath = writeRootStripStockScript(appPath);
+        try {
+            const out = await runWithAdminPrivileges(scriptPath);
+            if (out) {
+                (0, logger_1.log)(out);
+            }
+            stripOk = true;
+            (0, logger_1.logSuccess)('已通过系统密码框移除 LSEnvironment 并完成重签名');
+        }
+        catch (e) {
+            (0, logger_1.logError)(`恢复原生（系统对话框）: ${e instanceof Error ? e.message : String(e)}`);
+            try {
+                const launcher = writeTerminalSudoLauncher(scriptPath, 'Antigravity Proxy · 恢复原生启动（终端 sudo）');
+                await openLauncherInTerminalApp(launcher);
+                stripDeferredToTerminal = true;
+                (0, logger_1.logSuccess)('已在「终端.app」打开恢复脚本（请在系统终端窗口输入密码）');
+            }
+            catch (e2) {
+                const msg = formatAdminPrivilegeError(e);
+                const extra = e2 instanceof Error ? e2.message : String(e2);
+                (0, logger_1.logError)(`恢复原生兜底失败: ${extra}`);
+                void vscode.window.showErrorMessage(`未能完成移除注入/重签名：${msg}。可查看输出通道中的脚本路径，在系统「终端」手动执行：sudo /bin/bash <路径>`);
+            }
+        }
+    }
+    isProxyRunning = false;
+    stopStatusPoller();
+    (0, statusIndicator_1.setRuntimeIndicator)('bad');
+    // 检测系统代理是否仍指向本地，若是则单独弹警告（最常见的「停用后断网」原因）
+    const sysProxyWarn = await (0, diagnostics_1.checkSystemProxyForWarning)();
+    if (sysProxyWarn) {
+        (0, logger_1.log)(sysProxyWarn);
+        void vscode.window.showWarningMessage(sysProxyWarn, '前往系统设置 → 代理', '知道了').then(choice => {
+            if (choice === '前往系统设置 → 代理') {
+                void vscode.env.openExternal(vscode.Uri.parse('x-apple.systempreferences:com.apple.Network-Settings.extension'));
+            }
+        });
+    }
+    if (appPath && stripOk) {
+        logRestoreNoProxyFollowUp('full');
+        showRestoreNoProxyToast('完全停用已完成：hosts/中继已清，LSEnvironment 已移除并重签名。请从访达启动 Antigravity。更多项（多副本、终端代理变量、系统代理、DNS）已写入输出日志。');
+    }
+    else if (appPath && stripDeferredToTerminal) {
+        logRestoreNoProxyFollowUp('terminal_pending');
+        showRestoreNoProxyToast('hosts/relay 已清理；已在「终端.app」打开恢复脚本。请在终端内输入密码直至脚本结束，再从访达启动 Antigravity。后续注意项已写入输出日志。');
+    }
+    else if (!appPath) {
+        (0, logger_1.log)('未找到 Antigravity.app，仅完成 hosts/relay 清理；若要移除 LSEnvironment，请在配置页填写应用路径后再执行。');
+        logRestoreNoProxyFollowUp('no_app_path');
+        void vscode.window
+            .showWarningMessage('已清理 hosts 与中继并退出 Antigravity；未找到 .app 路径，未修改 Info.plist。请在配置中指定与实际访达打开路径一致的 .app 后，再次执行「完全停用代理」。详细说明已写入输出日志。', '查看日志')
+            .then(choice => {
+            if (choice === '查看日志') {
+                (0, logger_1.showLog)();
+            }
+        });
+    }
+    for (const fn of restoreStockListeners) {
+        try {
+            fn();
+        }
+        catch { }
+    }
 }
 /**
  * 尝试恢复运行状态（用于扩展激活时）

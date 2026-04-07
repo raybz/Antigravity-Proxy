@@ -26,7 +26,7 @@ echo ""
 echo "✓ ${SUDO_HELPER_PATH} 与 /etc/sudoers.d/antigravity-proxy 已就绪（仅此路径免密）。"
 `;
 
-    const scriptPath = '/tmp/antigravity-install-helper.sh';
+    const scriptPath = `/tmp/antigravity-install-helper-${Date.now()}.sh`;
     try {
         fs.writeFileSync(scriptPath, installBody, { mode: 0o755 });
         void vscode.env.clipboard.writeText(`${line}\n`);

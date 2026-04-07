@@ -1,8 +1,8 @@
 import * as vscode from 'vscode';
-import { getConfig, updateConfig, syncConfigYaml, ProxyConfig } from './configManager';
+import { getConfig, updateConfig, syncConfigYaml, normalizeProxyConfigFromUI, ProxyConfig } from './configManager';
 import { validateAll, ValidationResult, detectAntigravityPath } from './validator';
 import { collectDiagnostics } from './diagnostics';
-import { preparePrivilegedEnvironment } from './proxyManager';
+import { preparePrivilegedEnvironment, onRestoreStockDone } from './proxyManager';
 import { installSudoHelper } from './installHelper';
 import { log, logSuccess, logError } from './logger';
 
@@ -27,18 +27,26 @@ export function openConfigWebview(context: vscode.ExtensionContext): void {
     const config = getConfig();
     panel.webview.html = getWebviewContent(config);
 
+    const restoreStockSub = onRestoreStockDone(async () => {
+        try {
+            const items = await collectDiagnostics(context.extensionPath, getConfig());
+            panel?.webview.postMessage({ command: 'environmentResults', items });
+        } catch {}
+    });
+    context.subscriptions.push(restoreStockSub);
+
     panel.webview.onDidReceiveMessage(
         async (message) => {
             switch (message.command) {
                 case 'validate': {
-                    const cfg = message.config as ProxyConfig;
+                    const cfg = normalizeProxyConfigFromUI(message.config);
                     log('🔍 执行配置校验...');
                     const results = await validateAll(cfg);
                     panel?.webview.postMessage({ command: 'validationResults', results });
                     break;
                 }
                 case 'save': {
-                    const cfg = message.config as ProxyConfig;
+                    const cfg = normalizeProxyConfigFromUI(message.config);
                     log('💾 保存配置...');
 
                     // 先校验
@@ -60,14 +68,33 @@ export function openConfigWebview(context: vscode.ExtensionContext): void {
                     await updateConfig(cfg);
                     syncConfigYaml(cfg);
 
+                    const effective = getConfig();
+                    const hostMismatch = effective.host !== cfg.host;
+                    const portMismatch = effective.port !== cfg.port;
+
                     panel?.webview.postMessage({
                         command: 'saveResult',
                         success: true,
-                        message: '配置已保存成功！',
+                        banner: hostMismatch || portMismatch ? 'warning' : 'success',
+                        message:
+                            hostMismatch || portMismatch
+                                ? `已写入设置，但当前窗口读到的代理为 ${effective.host}:${effective.port}（可能被语言/工作区覆盖）。请在设置中搜索 antigravity-proxy 或重载窗口。`
+                                : '配置已保存成功！',
                         results,
                     });
-                    logSuccess('配置保存成功');
-                    vscode.window.showInformationMessage('✅ Antigravity Proxy 配置保存成功！');
+                    if (hostMismatch || portMismatch) {
+                        logError(
+                            `保存后与 getConfig 不一致: 期望 ${cfg.host}:${cfg.port}，实际 ${effective.host}:${effective.port}`
+                        );
+                        void vscode.window.showWarningMessage(
+                            `代理设置可能被其它作用域覆盖：当前为 ${effective.host}:${effective.port}。请检查各层级 settings 或「开发人员: 重新加载窗口」。`
+                        );
+                    } else {
+                        logSuccess('配置保存成功');
+                        void vscode.window.showInformationMessage(
+                            '✅ 配置已保存。若修改了代理端口，请重新执行「准备特权环境」或先停止再启动代理，以使中继使用新端口。'
+                        );
+                    }
                     break;
                 }
                 case 'detectAntigravity': {
@@ -94,7 +121,7 @@ export function openConfigWebview(context: vscode.ExtensionContext): void {
                     break;
                 }
                 case 'diagnoseEnvironment': {
-                    const cfg = message.config as ProxyConfig;
+                    const cfg = normalizeProxyConfigFromUI(message.config);
                     log('🔍 配置页：检测 hosts / 中继 / 内置组件…');
                     try {
                         const items = await collectDiagnostics(context.extensionPath, cfg);
@@ -110,12 +137,15 @@ export function openConfigWebview(context: vscode.ExtensionContext): void {
                     break;
                 }
                 case 'runPrepareEnvironment': {
-                    const cfg = message.config as ProxyConfig;
+                    const cfg = normalizeProxyConfigFromUI(message.config);
                     await preparePrivilegedEnvironment(cfg);
                     break;
                 }
                 case 'installSudoHelper':
                     installSudoHelper(context);
+                    break;
+                case 'restoreStockProxy':
+                    await vscode.commands.executeCommand('antigravity-proxy.restoreStock');
                     break;
             }
         },
@@ -124,8 +154,19 @@ export function openConfigWebview(context: vscode.ExtensionContext): void {
     );
 
     panel.onDidDispose(() => {
+        restoreStockSub.dispose();
         panel = undefined;
     });
+}
+
+/** 转义 HTML 属性值，防止含特殊字符的配置项破坏 HTML 结构 */
+function escapeAttr(value: string | number): string {
+    return String(value)
+        .replace(/&/g, '&amp;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;');
 }
 
 function getWebviewContent(config: ProxyConfig): string {
@@ -182,6 +223,12 @@ function getWebviewContent(config: ProxyConfig): string {
             background: var(--vscode-testing-iconFailed, #f8514920);
             border: 1px solid var(--vscode-testing-iconFailed, #f85149);
             color: var(--vscode-testing-iconFailed, #f85149);
+        }
+        .banner.warning {
+            display: flex;
+            background: var(--vscode-list-warningForeground, #cca70020);
+            border: 1px solid var(--vscode-editorWarning-foreground, #cca700);
+            color: var(--vscode-editorWarning-foreground, #cca700);
         }
 
         /* 分组 */
@@ -278,6 +325,9 @@ function getWebviewContent(config: ProxyConfig): string {
         button.secondary:hover {
             background: var(--vscode-button-secondaryHoverBackground);
         }
+        button.secondary.danger {
+            border: 1px solid var(--vscode-inputValidation-errorBorder, var(--vscode-errorForeground));
+        }
         button:disabled {
             opacity: 0.5;
             cursor: not-allowed;
@@ -311,6 +361,13 @@ function getWebviewContent(config: ProxyConfig): string {
         .hint {
             font-size: 11px;
             color: var(--vscode-descriptionForeground);
+        }
+        .hint-list {
+            margin: 6px 0 0 0;
+            padding-left: 1.2em;
+        }
+        .hint-list li {
+            margin: 4px 0;
         }
 
         /* 加载动画 */
@@ -399,7 +456,7 @@ function getWebviewContent(config: ProxyConfig): string {
         <div class="form-row">
             <div class="form-label">代理地址</div>
             <div class="form-input-group">
-                <input type="text" id="host" value="${config.host}" placeholder="127.0.0.1" />
+                <input type="text" id="host" value="${escapeAttr(config.host)}" placeholder="127.0.0.1" />
                 <div id="status-host" class="validation-status"></div>
             </div>
         </div>
@@ -407,7 +464,7 @@ function getWebviewContent(config: ProxyConfig): string {
         <div class="form-row">
             <div class="form-label">代理端口</div>
             <div class="form-input-group">
-                <input type="number" id="port" value="${config.port}" min="1" max="65535" placeholder="10808" />
+                <input type="number" id="port" value="${escapeAttr(config.port)}" min="1" max="65535" placeholder="10808" />
                 <div id="status-port" class="validation-status"></div>
             </div>
         </div>
@@ -426,7 +483,7 @@ function getWebviewContent(config: ProxyConfig): string {
             <div class="form-label">连接超时</div>
             <div class="form-input-group">
                 <div class="form-input-row">
-                    <input type="number" id="timeout" value="${config.timeout}" min="1000" max="30000" />
+                    <input type="number" id="timeout" value="${escapeAttr(config.timeout)}" min="1000" max="30000" />
                     <span class="hint">毫秒</span>
                 </div>
             </div>
@@ -443,7 +500,7 @@ function getWebviewContent(config: ProxyConfig): string {
             <div class="form-label">Antigravity 路径</div>
             <div class="form-input-group">
                 <div class="form-input-row">
-                    <input type="text" id="antigravityAppPath" value="${config.antigravityAppPath}" placeholder="留空自动检测" />
+                    <input type="text" id="antigravityAppPath" value="${escapeAttr(config.antigravityAppPath)}" placeholder="留空自动检测" />
                     <button class="secondary browse-btn" onclick="browse('antigravityAppPath')">浏览...</button>
                     <button class="secondary browse-btn" onclick="detectAntigravity()">自动检测</button>
                 </div>
@@ -473,6 +530,36 @@ function getWebviewContent(config: ProxyConfig): string {
                     <span class="hint">已安装免密 sudo helper、且未开「自动启动」时：启动编辑器后若 hosts 或 SNI 中继未就绪，自动执行「准备特权环境」。免密只省去密码，不会单独完成写 hosts。</span>
                 </div>
             </div>
+        </div>
+        <div class="form-row">
+            <div class="form-label">状态栏指示器</div>
+            <div class="form-input-group">
+                <div class="checkbox-row">
+                    <input type="checkbox" id="showStatusBar" ${config.showStatusBar !== false ? 'checked' : ''} />
+                    <span class="hint">在编辑器右下角显示「AG-Proxy」圆点（绿/黄/红）。关闭后不再占用状态栏；设置项同步为 <code>antigravity-proxy.showStatusBar</code>（亦可在 VS Code 设置里搜索）。若曾安装过旧版扩展，请卸载重复条目以免出现两个状态图标。</span>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- 断开代理 / 恢复原生 -->
+    <div class="section">
+        <div class="section-title">🔌 完全停用代理（等同未使用本扩展）</div>
+        <p class="hint">退出 Antigravity，清理 hosts 与 SNI 中继，关闭自动拉起，移除 LSEnvironment 并重签名。完成后点提示里的 <strong>查看日志</strong> 可看到完整注意项。</p>
+        <p class="hint"><strong>开始前</strong></p>
+        <ul class="hint hint-list">
+            <li>配置里 .app 路径与访达打开的为<strong>同一份</strong>；多副本要对常用那份执行。</li>
+            <li>曾用仓库 <strong>Makefile</strong> 注入的，须对<strong>同一 bundle</strong> 执行本操作。</li>
+        </ul>
+        <p class="hint"><strong>完成后</strong></p>
+        <ul class="hint hint-list">
+            <li>从<strong>访达</strong>启动；避免在带 <code>HTTP_PROXY</code> / <code>ALL_PROXY</code> 的终端启动（可 <code>env | grep -i proxy</code>）。</li>
+            <li>系统设置 → 网络 → 详细信息 → <strong>代理</strong>：若自行开过，直连时可关。</li>
+            <li>DNS 异常：<code>sudo dscacheutil -flushcache && sudo killall -HUP mDNSResponder</code></li>
+            <li>仍异常：「检测 hosts / 中继」看 <strong>LSEnvironment</strong>；免密 helper 过旧请先重装。</li>
+        </ul>
+        <div class="env-actions" style="margin-top: 12px;">
+            <button type="button" class="secondary danger" id="btnRestoreStock" onclick="runRestoreStock()">🔕 完全停用代理（未使用扩展时）</button>
         </div>
     </div>
 
@@ -509,13 +596,14 @@ function getWebviewContent(config: ProxyConfig): string {
         function getFormValues() {
             return {
                 host: document.getElementById('host').value,
-                port: parseInt(document.getElementById('port').value) || 0,
+                port: parseInt(document.getElementById('port').value, 10) || 0,
                 type: document.getElementById('type').value,
-                timeout: parseInt(document.getElementById('timeout').value) || 5000,
+                timeout: parseInt(document.getElementById('timeout').value, 10) || 5000,
 
                 antigravityAppPath: document.getElementById('antigravityAppPath').value,
                 autoStart: document.getElementById('autoStart').checked,
                 autoPrepareHostsRelay: document.getElementById('autoPrepareHostsRelay').checked,
+                showStatusBar: document.getElementById('showStatusBar').checked,
             };
         }
 
@@ -551,6 +639,10 @@ function getWebviewContent(config: ProxyConfig): string {
 
         function runInstallSudoHelper() {
             vscode.postMessage({ command: 'installSudoHelper' });
+        }
+
+        function runRestoreStock() {
+            vscode.postMessage({ command: 'restoreStockProxy' });
         }
 
         function showEnvDiagnosticsShell(expanded) {
@@ -707,7 +799,8 @@ function getWebviewContent(config: ProxyConfig): string {
                     if (msg.results) {
                         applyValidationResults(msg.results);
                     }
-                    showBanner(msg.success ? 'success' : 'error', msg.message);
+                    const kind = msg.banner || (msg.success ? 'success' : 'error');
+                    showBanner(kind, msg.message);
                     break;
                 }
                 case 'detectedPath': {
